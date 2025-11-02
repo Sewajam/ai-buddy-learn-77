@@ -1,14 +1,16 @@
 import { useRef, useEffect } from "react";
-import { BookOpen, Sparkles, Trash2 } from "lucide-react";
+import { BookOpen, Sparkles, Trash2, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import ChatMessage from "@/components/ChatMessage";
 import ChatInput from "@/components/ChatInput";
 import { useStudyChat } from "@/hooks/useStudyChat";
+import { useNavigate } from "react-router-dom";
 import heroImage from "@/assets/hero-study.jpg";
 
 const Index = () => {
   const { messages, isLoading, sendMessage, clearChat } = useStudyChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -41,6 +43,15 @@ const Index = () => {
           <p className="text-xl text-muted-foreground max-w-2xl mx-auto mb-8 animate-in fade-in slide-in-from-top-8 duration-700">
             Get instant help with your studies. Ask questions, clarify concepts, and learn more effectively with AI-powered assistance.
           </p>
+
+          <Button 
+            size="lg" 
+            onClick={() => navigate('/auth')}
+            className="mb-8 animate-in fade-in slide-in-from-top-9 duration-700"
+          >
+            Get Started
+            <ArrowRight className="w-4 h-4 ml-2" />
+          </Button>
 
           <div className="flex items-center justify-center gap-6 text-sm text-muted-foreground animate-in fade-in slide-in-from-top-10 duration-700">
             <div className="flex items-center gap-2">
