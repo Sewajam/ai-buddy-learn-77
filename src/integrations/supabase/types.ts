@@ -14,7 +14,224 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      documents: {
+        Row: {
+          content: string | null
+          created_at: string | null
+          file_path: string
+          file_size: number | null
+          id: string
+          processed: boolean | null
+          title: string
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          content?: string | null
+          created_at?: string | null
+          file_path: string
+          file_size?: number | null
+          id?: string
+          processed?: boolean | null
+          title: string
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          content?: string | null
+          created_at?: string | null
+          file_path?: string
+          file_size?: number | null
+          id?: string
+          processed?: boolean | null
+          title?: string
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      flashcards: {
+        Row: {
+          answer: string
+          created_at: string | null
+          difficulty: string | null
+          document_id: string | null
+          id: string
+          next_review_date: string | null
+          question: string
+          times_correct: number | null
+          times_reviewed: number | null
+          user_id: string
+        }
+        Insert: {
+          answer: string
+          created_at?: string | null
+          difficulty?: string | null
+          document_id?: string | null
+          id?: string
+          next_review_date?: string | null
+          question: string
+          times_correct?: number | null
+          times_reviewed?: number | null
+          user_id: string
+        }
+        Update: {
+          answer?: string
+          created_at?: string | null
+          difficulty?: string | null
+          document_id?: string | null
+          id?: string
+          next_review_date?: string | null
+          question?: string
+          times_correct?: number | null
+          times_reviewed?: number | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "flashcards_document_id_fkey"
+            columns: ["document_id"]
+            isOneToOne: false
+            referencedRelation: "documents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      profiles: {
+        Row: {
+          avatar_url: string | null
+          created_at: string | null
+          display_name: string | null
+          id: string
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          avatar_url?: string | null
+          created_at?: string | null
+          display_name?: string | null
+          id?: string
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          avatar_url?: string | null
+          created_at?: string | null
+          display_name?: string | null
+          id?: string
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      quiz_results: {
+        Row: {
+          answers: Json | null
+          completed_at: string | null
+          id: string
+          quiz_id: string | null
+          score: number
+          total_questions: number
+          user_id: string
+        }
+        Insert: {
+          answers?: Json | null
+          completed_at?: string | null
+          id?: string
+          quiz_id?: string | null
+          score: number
+          total_questions: number
+          user_id: string
+        }
+        Update: {
+          answers?: Json | null
+          completed_at?: string | null
+          id?: string
+          quiz_id?: string | null
+          score?: number
+          total_questions?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "quiz_results_quiz_id_fkey"
+            columns: ["quiz_id"]
+            isOneToOne: false
+            referencedRelation: "quizzes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      quizzes: {
+        Row: {
+          created_at: string | null
+          document_id: string | null
+          id: string
+          questions: Json
+          title: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string | null
+          document_id?: string | null
+          id?: string
+          questions: Json
+          title: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string | null
+          document_id?: string | null
+          id?: string
+          questions?: Json
+          title?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "quizzes_document_id_fkey"
+            columns: ["document_id"]
+            isOneToOne: false
+            referencedRelation: "documents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      study_sessions: {
+        Row: {
+          activity_type: string | null
+          created_at: string | null
+          document_id: string | null
+          duration_minutes: number | null
+          id: string
+          user_id: string
+        }
+        Insert: {
+          activity_type?: string | null
+          created_at?: string | null
+          document_id?: string | null
+          duration_minutes?: number | null
+          id?: string
+          user_id: string
+        }
+        Update: {
+          activity_type?: string | null
+          created_at?: string | null
+          document_id?: string | null
+          duration_minutes?: number | null
+          id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "study_sessions_document_id_fkey"
+            columns: ["document_id"]
+            isOneToOne: false
+            referencedRelation: "documents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
