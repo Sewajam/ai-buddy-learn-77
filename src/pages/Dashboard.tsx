@@ -49,16 +49,66 @@ export default function Dashboard() {
     navigate('/auth');
   };
 
+  const handleGenerateFlashcards = async (documentId: string) => {
+    try {
+      toast({ title: "Generating flashcards...", description: "This may take a moment." });
+      
+      const { data, error } = await supabase.functions.invoke('generate-flashcards', {
+        body: { documentId }
+      });
+
+      if (error) throw error;
+
+      toast({ 
+        title: "Success!", 
+        description: `Generated ${data.count} flashcards. Check the Flashcards tab.` 
+      });
+      
+    } catch (error: any) {
+      console.error('Error generating flashcards:', error);
+      toast({ 
+        title: "Error", 
+        description: error.message || "Failed to generate flashcards",
+        variant: "destructive" 
+      });
+    }
+  };
+
+  const handleCreateQuiz = async (documentId: string) => {
+    try {
+      toast({ title: "Creating quiz...", description: "This may take a moment." });
+      
+      const { data, error } = await supabase.functions.invoke('generate-quiz', {
+        body: { documentId }
+      });
+
+      if (error) throw error;
+
+      toast({ 
+        title: "Success!", 
+        description: "Quiz created! Check the Progress tab to take it." 
+      });
+      
+    } catch (error: any) {
+      console.error('Error creating quiz:', error);
+      toast({ 
+        title: "Error", 
+        description: error.message || "Failed to create quiz",
+        variant: "destructive" 
+      });
+    }
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file || !user) return;
 
-    // Check file size (20MB limit)
-    if (file.size > 20 * 1024 * 1024) {
+    const maxSize = 20 * 1024 * 1024;
+    if (file.size > maxSize) {
       toast({
-        title: 'File too large',
-        description: 'Maximum file size is 20MB',
-        variant: 'destructive',
+        title: "File too large",
+        description: "Please upload a file smaller than 20MB",
+        variant: "destructive",
       });
       return;
     }
@@ -66,18 +116,15 @@ export default function Dashboard() {
     setIsUploading(true);
 
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error('Not authenticated');
+      const fileExt = file.name.split('.').pop();
+      const filePath = `${user.id}/${crypto.randomUUID()}.${fileExt}`;
 
-      // Upload file to storage
-      const filePath = `${user.id}/${Date.now()}-${file.name}`;
       const { error: uploadError } = await supabase.storage
         .from('documents')
         .upload(filePath, file);
 
       if (uploadError) throw uploadError;
 
-      // Create document record
       const { error: dbError } = await supabase
         .from('documents')
         .insert({
@@ -90,20 +137,20 @@ export default function Dashboard() {
       if (dbError) throw dbError;
 
       toast({
-        title: 'Success!',
-        description: 'Document uploaded successfully',
+        title: "Upload successful",
+        description: "Your document has been uploaded",
       });
 
       fetchDocuments();
     } catch (error: any) {
+      console.error('Upload error:', error);
       toast({
-        title: 'Upload failed',
+        title: "Upload failed",
         description: error.message,
-        variant: 'destructive',
+        variant: "destructive",
       });
     } finally {
       setIsUploading(false);
-      e.target.value = '';
     }
   };
 
@@ -187,10 +234,20 @@ export default function Dashboard() {
                   </CardHeader>
                   <CardContent>
                     <div className="flex gap-2">
-                      <Button size="sm" variant="outline" className="flex-1">
+                      <Button 
+                        size="sm" 
+                        variant="outline" 
+                        className="flex-1"
+                        onClick={() => handleGenerateFlashcards(doc.id)}
+                      >
                         Generate Flashcards
                       </Button>
-                      <Button size="sm" variant="outline" className="flex-1">
+                      <Button 
+                        size="sm" 
+                        variant="outline" 
+                        className="flex-1"
+                        onClick={() => handleCreateQuiz(doc.id)}
+                      >
                         Create Quiz
                       </Button>
                     </div>
