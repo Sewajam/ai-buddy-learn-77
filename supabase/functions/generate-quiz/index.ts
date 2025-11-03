@@ -16,17 +16,20 @@ serve(async (req) => {
     const { documentId } = await req.json();
     console.log('Generating quiz for document:', documentId);
 
-    const supabaseClient = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? ''
-    );
-
-    // Get user from JWT token
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) throw new Error('No authorization header');
 
-    const token = authHeader.replace('Bearer ', '');
-    const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token);
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      {
+        global: {
+          headers: { Authorization: authHeader },
+        },
+      }
+    );
+
+    const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
     if (userError || !user) throw new Error('User not authenticated');
 
     // Get the document
@@ -34,9 +37,10 @@ serve(async (req) => {
       .from('documents')
       .select('*')
       .eq('id', documentId)
-      .single();
+      .maybeSingle();
 
     if (docError) throw docError;
+    if (!document) throw new Error('Document not found');
 
     // Download the file content
     const { data: fileData, error: fileError } = await supabaseClient
@@ -133,9 +137,10 @@ serve(async (req) => {
         questions: quizData.questions,
       })
       .select()
-      .single();
+      .maybeSingle();
 
     if (insertError) throw insertError;
+    if (!quiz) throw new Error('Failed to create quiz');
 
     console.log(`Successfully created quiz with ${quizData.questions.length} questions`);
 
