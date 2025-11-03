@@ -12,6 +12,8 @@ import { Label } from '@/components/ui/label';
 export default function Dashboard() {
   const [user, setUser] = useState<any>(null);
   const [documents, setDocuments] = useState<any[]>([]);
+  const [flashcards, setFlashcards] = useState<any[]>([]);
+  const [quizzes, setQuizzes] = useState<any[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -19,6 +21,8 @@ export default function Dashboard() {
   useEffect(() => {
     checkAuth();
     fetchDocuments();
+    fetchFlashcards();
+    fetchQuizzes();
   }, []);
 
   const checkAuth = async () => {
@@ -44,6 +48,24 @@ export default function Dashboard() {
     if (data) setDocuments(data);
   };
 
+  const fetchFlashcards = async () => {
+    const { data } = await supabase
+      .from('flashcards')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (data) setFlashcards(data);
+  };
+
+  const fetchQuizzes = async () => {
+    const { data } = await supabase
+      .from('quizzes')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (data) setQuizzes(data);
+  };
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     navigate('/auth');
@@ -63,6 +85,8 @@ export default function Dashboard() {
         title: "Success!", 
         description: `Generated ${data.count} flashcards. Check the Flashcards tab.` 
       });
+
+      fetchFlashcards();
       
     } catch (error: any) {
       console.error('Error generating flashcards:', error);
@@ -88,6 +112,8 @@ export default function Dashboard() {
         title: "Success!", 
         description: "Quiz created! Check the Progress tab to take it." 
       });
+
+      fetchQuizzes();
       
     } catch (error: any) {
       console.error('Error creating quiz:', error);
@@ -269,25 +295,79 @@ export default function Dashboard() {
           </TabsContent>
 
           <TabsContent value="flashcards">
-            <Card>
-              <CardContent className="flex flex-col items-center justify-center py-12">
-                <BookOpen className="h-12 w-12 text-muted-foreground mb-4" />
-                <p className="text-muted-foreground text-center">
-                  Flashcards will appear here after you generate them from your documents
-                </p>
-              </CardContent>
-            </Card>
+            {flashcards.length === 0 ? (
+              <Card>
+                <CardContent className="flex flex-col items-center justify-center py-12">
+                  <BookOpen className="h-12 w-12 text-muted-foreground mb-4" />
+                  <p className="text-muted-foreground text-center">
+                    Flashcards will appear here after you generate them from your documents
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-2">
+                {flashcards.map((card) => (
+                  <Card key={card.id} className="hover:shadow-lg transition-shadow">
+                    <CardHeader>
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-lg">Flashcard</CardTitle>
+                        <span className={`text-xs px-2 py-1 rounded ${
+                          card.difficulty === 'easy' ? 'bg-green-100 text-green-800' :
+                          card.difficulty === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                          'bg-red-100 text-red-800'
+                        }`}>
+                          {card.difficulty}
+                        </span>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-3">
+                        <div>
+                          <p className="text-sm font-semibold text-muted-foreground">Question:</p>
+                          <p className="mt-1">{card.question}</p>
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-muted-foreground">Answer:</p>
+                          <p className="mt-1">{card.answer}</p>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="progress">
-            <Card>
-              <CardContent className="flex flex-col items-center justify-center py-12">
-                <Trophy className="h-12 w-12 text-muted-foreground mb-4" />
-                <p className="text-muted-foreground text-center">
-                  Your study progress and analytics will appear here
-                </p>
-              </CardContent>
-            </Card>
+            {quizzes.length === 0 ? (
+              <Card>
+                <CardContent className="flex flex-col items-center justify-center py-12">
+                  <Trophy className="h-12 w-12 text-muted-foreground mb-4" />
+                  <p className="text-muted-foreground text-center">
+                    Your quizzes will appear here after you create them
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <div className="space-y-4">
+                {quizzes.map((quiz) => (
+                  <Card key={quiz.id} className="hover:shadow-lg transition-shadow">
+                    <CardHeader>
+                      <CardTitle>{quiz.title}</CardTitle>
+                      <CardDescription>
+                        Created {new Date(quiz.created_at).toLocaleDateString()}
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <p className="text-sm text-muted-foreground mb-4">
+                        {quiz.questions?.length || 0} questions
+                      </p>
+                      <Button>Take Quiz</Button>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
           </TabsContent>
         </Tabs>
       </main>
