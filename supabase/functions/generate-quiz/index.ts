@@ -18,13 +18,16 @@ serve(async (req) => {
 
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-      {
-        global: {
-          headers: { Authorization: req.headers.get('Authorization')! },
-        },
-      }
+      Deno.env.get('SUPABASE_ANON_KEY') ?? ''
     );
+
+    // Get user from JWT token
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) throw new Error('No authorization header');
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token);
+    if (userError || !user) throw new Error('User not authenticated');
 
     // Get the document
     const { data: document, error: docError } = await supabaseClient
@@ -118,10 +121,7 @@ serve(async (req) => {
     if (!toolCall) throw new Error('No quiz generated');
 
     const quizData = JSON.parse(toolCall.function.arguments);
-
-    // Get user ID from auth
-    const { data: { user } } = await supabaseClient.auth.getUser();
-    if (!user) throw new Error('User not authenticated');
+    const questions = quizData.questions;
 
     // Insert quiz into database
     const { data: quiz, error: insertError } = await supabaseClient

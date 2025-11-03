@@ -18,13 +18,16 @@ serve(async (req) => {
 
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-      {
-        global: {
-          headers: { Authorization: req.headers.get('Authorization')! },
-        },
-      }
+      Deno.env.get('SUPABASE_ANON_KEY') ?? ''
     );
+
+    // Get user from JWT token
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader) throw new Error('No authorization header');
+
+    const token = authHeader.replace('Bearer ', '');
+    const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token);
+    if (userError || !user) throw new Error('User not authenticated');
 
     // Get the document
     const { data: document, error: docError } = await supabaseClient
@@ -111,10 +114,6 @@ serve(async (req) => {
 
     const flashcardsData = JSON.parse(toolCall.function.arguments);
     const flashcards = flashcardsData.flashcards;
-
-    // Get user ID from auth
-    const { data: { user } } = await supabaseClient.auth.getUser();
-    if (!user) throw new Error('User not authenticated');
 
     // Insert flashcards into database
     const flashcardsToInsert = flashcards.map((card: any) => ({
