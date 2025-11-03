@@ -17,6 +17,7 @@ serve(async (req) => {
     console.log('Generating quiz for document:', documentId);
 
     const authHeader = req.headers.get('Authorization');
+    console.log('Auth header present:', !!authHeader);
     if (!authHeader) throw new Error('No authorization header');
 
     const supabaseClient = createClient(
@@ -30,6 +31,7 @@ serve(async (req) => {
     );
 
     const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+    console.log('User authenticated:', !!user, 'Error:', userError?.message);
     if (userError || !user) throw new Error('User not authenticated');
 
     // Get the document

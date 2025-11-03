@@ -53,8 +53,21 @@ export default function Dashboard() {
     try {
       toast({ title: "Generating flashcards...", description: "This may take a moment." });
       
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        toast({ 
+          title: "Error", 
+          description: "You must be logged in to generate flashcards",
+          variant: "destructive" 
+        });
+        return;
+      }
+
       const { data, error } = await supabase.functions.invoke('generate-flashcards', {
-        body: { documentId }
+        body: { documentId },
+        headers: {
+          Authorization: `Bearer ${session.access_token}`
+        }
       });
 
       if (error) throw error;
@@ -78,8 +91,21 @@ export default function Dashboard() {
     try {
       toast({ title: "Creating quiz...", description: "This may take a moment." });
       
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        toast({ 
+          title: "Error", 
+          description: "You must be logged in to create a quiz",
+          variant: "destructive" 
+        });
+        return;
+      }
+
       const { data, error } = await supabase.functions.invoke('generate-quiz', {
-        body: { documentId }
+        body: { documentId },
+        headers: {
+          Authorization: `Bearer ${session.access_token}`
+        }
       });
 
       if (error) throw error;
