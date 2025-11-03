@@ -20,6 +20,8 @@ serve(async (req) => {
     console.log('Auth header present:', !!authHeader);
     if (!authHeader) throw new Error('No authorization header');
 
+    const token = authHeader.replace('Bearer ', '');
+
     const supabaseClient = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_ANON_KEY') ?? '',
@@ -30,7 +32,7 @@ serve(async (req) => {
       }
     );
 
-    const { data: { user }, error: userError } = await supabaseClient.auth.getUser();
+    const { data: { user }, error: userError } = await supabaseClient.auth.getUser(token);
     console.log('User authenticated:', !!user, 'Error:', userError?.message);
     if (userError || !user) throw new Error('User not authenticated');
 
