@@ -8,12 +8,16 @@ import { useToast } from '@/hooks/use-toast';
 import { Upload, BookOpen, FileText, Trophy, LogOut } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import FlashcardGenerator from '@/components/FlashcardGenerator';
+import FlashcardViewer from '@/components/FlashcardViewer';
+import QuizTaker from '@/components/QuizTaker';
 
 export default function Dashboard() {
   const [user, setUser] = useState<any>(null);
   const [documents, setDocuments] = useState<any[]>([]);
   const [flashcards, setFlashcards] = useState<any[]>([]);
   const [quizzes, setQuizzes] = useState<any[]>([]);
+  const [selectedQuiz, setSelectedQuiz] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -71,12 +75,12 @@ export default function Dashboard() {
     navigate('/auth');
   };
 
-  const handleGenerateFlashcards = async (documentId: string) => {
+  const handleGenerateFlashcards = async (documentId: string, count: number, difficulty: string) => {
     try {
       toast({ title: "Generating flashcards...", description: "This may take a moment." });
       
       const { data, error } = await supabase.functions.invoke('generate-flashcards', {
-        body: { documentId }
+        body: { documentId, count, difficulty }
       });
 
       if (error) throw error;
@@ -258,25 +262,20 @@ export default function Dashboard() {
                       Uploaded {new Date(doc.created_at).toLocaleDateString()}
                     </CardDescription>
                   </CardHeader>
-                  <CardContent>
-                    <div className="flex gap-2">
-                      <Button 
-                        size="sm" 
-                        variant="outline" 
-                        className="flex-1"
-                        onClick={() => handleGenerateFlashcards(doc.id)}
-                      >
-                        Generate Flashcards
-                      </Button>
-                      <Button 
-                        size="sm" 
-                        variant="outline" 
-                        className="flex-1"
-                        onClick={() => handleCreateQuiz(doc.id)}
-                      >
-                        Create Quiz
-                      </Button>
-                    </div>
+                  <CardContent className="space-y-2">
+                    <FlashcardGenerator
+                      documentId={doc.id}
+                      documentTitle={doc.title}
+                      onGenerate={handleGenerateFlashcards}
+                    />
+                    <Button 
+                      size="sm" 
+                      variant="outline" 
+                      className="w-full"
+                      onClick={() => handleCreateQuiz(doc.id)}
+                    >
+                      Create Quiz
+                    </Button>
                   </CardContent>
                 </Card>
               ))}
@@ -305,41 +304,17 @@ export default function Dashboard() {
                 </CardContent>
               </Card>
             ) : (
-              <div className="grid gap-4 md:grid-cols-2">
-                {flashcards.map((card) => (
-                  <Card key={card.id} className="hover:shadow-lg transition-shadow">
-                    <CardHeader>
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-lg">Flashcard</CardTitle>
-                        <span className={`text-xs px-2 py-1 rounded ${
-                          card.difficulty === 'easy' ? 'bg-green-100 text-green-800' :
-                          card.difficulty === 'medium' ? 'bg-yellow-100 text-yellow-800' :
-                          'bg-red-100 text-red-800'
-                        }`}>
-                          {card.difficulty}
-                        </span>
-                      </div>
-                    </CardHeader>
-                    <CardContent>
-                      <div className="space-y-3">
-                        <div>
-                          <p className="text-sm font-semibold text-muted-foreground">Question:</p>
-                          <p className="mt-1">{card.question}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold text-muted-foreground">Answer:</p>
-                          <p className="mt-1">{card.answer}</p>
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
+              <FlashcardViewer flashcards={flashcards} />
             )}
           </TabsContent>
 
           <TabsContent value="progress">
-            {quizzes.length === 0 ? (
+            {selectedQuiz ? (
+              <QuizTaker
+                quiz={selectedQuiz}
+                onComplete={() => setSelectedQuiz(null)}
+              />
+            ) : quizzes.length === 0 ? (
               <Card>
                 <CardContent className="flex flex-col items-center justify-center py-12">
                   <Trophy className="h-12 w-12 text-muted-foreground mb-4" />
@@ -362,7 +337,7 @@ export default function Dashboard() {
                       <p className="text-sm text-muted-foreground mb-4">
                         {quiz.questions?.length || 0} questions
                       </p>
-                      <Button>Take Quiz</Button>
+                      <Button onClick={() => setSelectedQuiz(quiz)}>Take Quiz</Button>
                     </CardContent>
                   </Card>
                 ))}

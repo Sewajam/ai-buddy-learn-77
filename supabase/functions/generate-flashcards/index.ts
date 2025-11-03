@@ -13,8 +13,8 @@ serve(async (req) => {
   }
 
   try {
-    const { documentId } = await req.json();
-    console.log('Generating flashcards for document:', documentId);
+    const { documentId, count = 10, difficulty = 'mixed' } = await req.json();
+    console.log('Generating flashcards for document:', documentId, 'count:', count, 'difficulty:', difficulty);
 
     const authHeader = req.headers.get('Authorization');
     console.log('Auth header present:', !!authHeader);
@@ -72,7 +72,7 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: 'You are an expert educator that creates effective study flashcards. Generate 10-15 flashcards from the provided document content. Focus on key concepts, definitions, and important facts.'
+            content: `You are an expert educator that creates effective study flashcards. Generate ${count} flashcards from the provided document content. ${difficulty === 'mixed' ? 'Use a mix of easy, medium, and hard difficulties.' : `Focus on ${difficulty} difficulty level.`} Focus on key concepts, definitions, and important facts.`
           },
           {
             role: 'user',
