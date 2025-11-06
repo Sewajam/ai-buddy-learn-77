@@ -72,7 +72,7 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator that creates effective study flashcards. Generate ${count} flashcards from the provided document content. ${difficulty === 'mixed' ? 'Use a mix of easy, medium, and hard difficulties.' : `Focus on ${difficulty} difficulty level.`} Focus on key concepts, definitions, and important facts.`
+            content: `You are an expert educator that creates effective study flashcards. Generate ${count} flashcards from the provided document content. ${difficulty === 'mixed' ? 'Use a mix of easy, medium, and hard difficulties.' : `Focus on ${difficulty} difficulty level.`} Focus on key concepts, definitions, and important facts from the CONTENT itself. DO NOT create questions about the document type, format, or meta-information (like "what is this document about" or "what kind of file is this"). Only create questions that test understanding of the actual subject matter and learning material within the document.`
           },
           {
             role: 'user',
