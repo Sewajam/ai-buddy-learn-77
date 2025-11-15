@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import FlashcardGenerator from '@/components/FlashcardGenerator';
 import FlashcardViewer from '@/components/FlashcardViewer';
+import QuizGenerator from '@/components/QuizGenerator';
 import QuizTaker from '@/components/QuizTaker';
 
 export default function Dashboard() {
@@ -75,7 +76,7 @@ export default function Dashboard() {
     navigate('/auth');
   };
 
-  const handleGenerateFlashcards = async (documentId: string, count: number, difficulty: string) => {
+  const handleGenerateFlashcards = async (documentId: string, count: number, difficulty: string, startPage?: number, endPage?: number) => {
     try {
       toast({ title: "Generating flashcards...", description: "This may take a moment." });
       
@@ -102,7 +103,7 @@ export default function Dashboard() {
     }
   };
 
-  const handleCreateQuiz = async (documentId: string) => {
+  const handleCreateQuiz = async (documentId: string, startPage?: number, endPage?: number) => {
     try {
       toast({ title: "Creating quiz...", description: "This may take a moment." });
       
@@ -268,14 +269,11 @@ export default function Dashboard() {
                       documentTitle={doc.title}
                       onGenerate={handleGenerateFlashcards}
                     />
-                    <Button 
-                      size="sm" 
-                      variant="outline" 
-                      className="w-full"
-                      onClick={() => handleCreateQuiz(doc.id)}
-                    >
-                      Create Quiz
-                    </Button>
+                    <QuizGenerator
+                      documentId={doc.id}
+                      documentTitle={doc.title}
+                      onGenerate={handleCreateQuiz}
+                    />
                   </CardContent>
                 </Card>
               ))}

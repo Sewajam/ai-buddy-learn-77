@@ -2,21 +2,26 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 interface FlashcardGeneratorProps {
   documentId: string;
   documentTitle: string;
-  onGenerate: (documentId: string, count: number, difficulty: string) => void;
+  onGenerate: (documentId: string, count: number, difficulty: string, startPage?: number, endPage?: number) => void;
 }
 
 export default function FlashcardGenerator({ documentId, documentTitle, onGenerate }: FlashcardGeneratorProps) {
   const [count, setCount] = useState("10");
   const [difficulty, setDifficulty] = useState("mixed");
+  const [startPage, setStartPage] = useState("");
+  const [endPage, setEndPage] = useState("");
   const [showOptions, setShowOptions] = useState(false);
 
   const handleGenerate = () => {
-    onGenerate(documentId, parseInt(count), difficulty);
+    const start = startPage ? parseInt(startPage) : undefined;
+    const end = endPage ? parseInt(endPage) : undefined;
+    onGenerate(documentId, parseInt(count), difficulty, start, end);
     setShowOptions(false);
   };
 
@@ -63,6 +68,27 @@ export default function FlashcardGenerator({ documentId, documentTitle, onGenera
               <SelectItem value="mixed">Mixed difficulty</SelectItem>
             </SelectContent>
           </Select>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Page Range (Optional)</Label>
+          <div className="flex gap-2">
+            <Input
+              type="number"
+              placeholder="Start"
+              min="1"
+              value={startPage}
+              onChange={(e) => setStartPage(e.target.value)}
+            />
+            <Input
+              type="number"
+              placeholder="End"
+              min="1"
+              value={endPage}
+              onChange={(e) => setEndPage(e.target.value)}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">Leave empty for entire document</p>
         </div>
 
         <div className="flex gap-2">

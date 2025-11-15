@@ -13,8 +13,8 @@ serve(async (req) => {
   }
 
   try {
-    const { documentId } = await req.json();
-    console.log('Generating quiz for document:', documentId);
+    const { documentId, startPage, endPage } = await req.json();
+    console.log('Generating quiz for document:', documentId, 'pages:', startPage, '-', endPage);
 
     const authHeader = req.headers.get('Authorization');
     console.log('Auth header present:', !!authHeader);
@@ -57,6 +57,38 @@ serve(async (req) => {
     const content = await fileData.text();
     console.log('Document content length:', content.length);
 
+    // Extract page range if specified
+    let contentToUse = content;
+    if (startPage || endPage) {
+      const pages = content.split(/\f|\n{5,}/);
+      const start = startPage ? startPage - 1 : 0;
+      const end = endPage ? endPage : pages.length;
+      contentToUse = pages.slice(start, end).join('\n\n');
+      console.log('Using pages', startPage || 1, 'to', endPage || pages.length, 'Content length:', contentToUse.length);
+    }
+
+    // Detect document language
+    const languageDetectResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${Deno.env.get('LOVABLE_API_KEY')}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'google/gemini-2.5-flash',
+        messages: [
+          {
+            role: 'user',
+            content: `Detect the primary language of this text and respond with ONLY the language name in English (e.g., "English", "Spanish", "French", "German", etc.):\n\n${contentToUse.substring(0, 2000)}`
+          }
+        ]
+      })
+    });
+
+    const langData = await languageDetectResponse.json();
+    const detectedLanguage = langData.choices[0].message.content.trim();
+    console.log('Detected language:', detectedLanguage);
+
     // Call Lovable AI to generate quiz
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
@@ -72,11 +104,11 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: 'You are an expert educator that creates effective assessment quizzes. Generate 10 multiple-choice questions from the provided document content. Each question should have 4 options with exactly one correct answer. Focus on testing knowledge of the actual subject matter, concepts, and facts within the content. DO NOT create meta-questions about the document itself (like "what type of document is this" or "what is the primary purpose"). Only test understanding of the learning material.'
+            content: `You are an expert educator that creates effective assessment quizzes. Generate 10 multiple-choice questions from the provided document content. Each question should have 4 options with exactly one correct answer. Focus on testing knowledge of the actual subject matter, concepts, and facts within the content. DO NOT create meta-questions about the document itself (like "what type of document is this" or "what is the primary purpose"). Only test understanding of the learning material. CRITICAL: Generate all questions, options, and explanations in ${detectedLanguage}. Everything must be in ${detectedLanguage}.`
           },
           {
             role: 'user',
-            content: `Generate a quiz from this document titled "${document.title}":\n\n${content.substring(0, 50000)}`
+            content: `Generate a quiz from this document titled "${document.title}":\n\n${contentToUse.substring(0, 50000)}`
           }
         ],
         tools: [{
