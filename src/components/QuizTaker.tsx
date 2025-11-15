@@ -150,11 +150,15 @@ export default function QuizTaker({ quiz, onComplete }: QuizTakerProps) {
           <div>
             <p className="text-lg mb-4">{question.question}</p>
             <RadioGroup
-              value={selectedAnswers[currentQuestion]?.toString()}
+              value={selectedAnswers[currentQuestion] !== undefined ? selectedAnswers[currentQuestion].toString() : ""}
               onValueChange={(value) => handleAnswerSelect(parseInt(value))}
             >
               {question.options.map((option, index) => (
-                <div key={index} className="flex items-center space-x-2 p-3 border rounded hover:bg-accent">
+                <div 
+                  key={index} 
+                  className="flex items-center space-x-2 p-3 border rounded hover:bg-accent cursor-pointer"
+                  onClick={() => handleAnswerSelect(index)}
+                >
                   <RadioGroupItem value={index.toString()} id={`option-${index}`} />
                   <Label htmlFor={`option-${index}`} className="flex-1 cursor-pointer">
                     {option}
