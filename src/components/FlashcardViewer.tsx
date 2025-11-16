@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ArrowLeft, BookOpen } from 'lucide-react';
 
 interface Flashcard {
   id: string;
@@ -10,18 +10,68 @@ interface Flashcard {
   difficulty: string;
 }
 
-interface FlashcardViewerProps {
+interface FlashcardSet {
+  id: string;
+  title: string;
+  card_count: number;
+  difficulty: string;
+  created_at: string;
   flashcards: Flashcard[];
 }
 
+interface FlashcardViewerProps {
+  flashcards: FlashcardSet[];
+}
+
 export default function FlashcardViewer({ flashcards }: FlashcardViewerProps) {
+  const [selectedSet, setSelectedSet] = useState<FlashcardSet | null>(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showAnswer, setShowAnswer] = useState(false);
 
-  const currentCard = flashcards[currentIndex];
+  if (!selectedSet) {
+    return (
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        {flashcards.map((set) => (
+          <Card 
+            key={set.id} 
+            className="hover:shadow-lg transition-shadow cursor-pointer"
+            onClick={() => {
+              setSelectedSet(set);
+              setCurrentIndex(0);
+              setShowAnswer(false);
+            }}
+          >
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <BookOpen className="h-5 w-5" />
+                {set.title}
+              </CardTitle>
+              <CardDescription>
+                {set.card_count} cards • Created {new Date(set.created_at).toLocaleDateString()}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-2">
+                <span className={`text-xs px-2 py-1 rounded ${
+                  set.difficulty === 'easy' ? 'bg-green-100 text-green-800' :
+                  set.difficulty === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                  set.difficulty === 'hard' ? 'bg-red-100 text-red-800' :
+                  'bg-blue-100 text-blue-800'
+                }`}>
+                  {set.difficulty === 'mixed' ? 'Mixed Difficulty' : set.difficulty}
+                </span>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    );
+  }
+
+  const currentCard = selectedSet.flashcards[currentIndex];
 
   const handleNext = () => {
-    if (currentIndex < flashcards.length - 1) {
+    if (currentIndex < selectedSet.flashcards.length - 1) {
       setCurrentIndex(currentIndex + 1);
       setShowAnswer(false);
     }
@@ -36,6 +86,15 @@ export default function FlashcardViewer({ flashcards }: FlashcardViewerProps) {
 
   return (
     <div className="space-y-4">
+      <Button 
+        variant="outline" 
+        onClick={() => setSelectedSet(null)}
+        className="mb-4"
+      >
+        <ArrowLeft className="h-4 w-4 mr-2" />
+        Back to Sets
+      </Button>
+
       <Card 
         className="cursor-pointer hover:shadow-lg transition-all min-h-[300px] flex flex-col"
         onClick={() => setShowAnswer(!showAnswer)}
@@ -43,7 +102,7 @@ export default function FlashcardViewer({ flashcards }: FlashcardViewerProps) {
         <CardHeader>
           <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">
-              Card {currentIndex + 1} of {flashcards.length}
+              Card {currentIndex + 1} of {selectedSet.flashcards.length}
             </span>
             <span className={`text-xs px-2 py-1 rounded ${
               currentCard.difficulty === 'easy' ? 'bg-green-100 text-green-800' :
@@ -85,7 +144,7 @@ export default function FlashcardViewer({ flashcards }: FlashcardViewerProps) {
         <Button
           variant="outline"
           onClick={handleNext}
-          disabled={currentIndex === flashcards.length - 1}
+          disabled={currentIndex === selectedSet.flashcards.length - 1}
         >
           Next
           <ChevronRight className="h-4 w-4 ml-2" />

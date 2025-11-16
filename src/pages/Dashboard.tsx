@@ -55,8 +55,8 @@ export default function Dashboard() {
 
   const fetchFlashcards = async () => {
     const { data } = await supabase
-      .from('flashcards')
-      .select('*')
+      .from('flashcard_sets')
+      .select('*, flashcards(*)')
       .order('created_at', { ascending: false });
     
     if (data) setFlashcards(data);
