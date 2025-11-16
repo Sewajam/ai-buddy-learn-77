@@ -86,6 +86,12 @@ serve(async (req) => {
       })
     });
 
+    if (!languageDetectResponse.ok) {
+      const errorText = await languageDetectResponse.text();
+      console.error('Language detection error:', languageDetectResponse.status, errorText);
+      throw new Error(`AI service temporarily unavailable. Please try again in a moment.`);
+    }
+
     const langData = await languageDetectResponse.json();
     const detectedLanguage = langData.choices[0].message.content.trim();
     console.log('Detected language:', detectedLanguage);
