@@ -50,6 +50,44 @@ export type Database = {
         }
         Relationships: []
       }
+      flashcard_sets: {
+        Row: {
+          card_count: number | null
+          created_at: string
+          difficulty: string | null
+          document_id: string | null
+          id: string
+          title: string
+          user_id: string
+        }
+        Insert: {
+          card_count?: number | null
+          created_at?: string
+          difficulty?: string | null
+          document_id?: string | null
+          id?: string
+          title: string
+          user_id: string
+        }
+        Update: {
+          card_count?: number | null
+          created_at?: string
+          difficulty?: string | null
+          document_id?: string | null
+          id?: string
+          title?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "flashcard_sets_document_id_fkey"
+            columns: ["document_id"]
+            isOneToOne: false
+            referencedRelation: "documents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       flashcards: {
         Row: {
           answer: string
@@ -59,6 +97,7 @@ export type Database = {
           id: string
           next_review_date: string | null
           question: string
+          set_id: string | null
           times_correct: number | null
           times_reviewed: number | null
           user_id: string
@@ -71,6 +110,7 @@ export type Database = {
           id?: string
           next_review_date?: string | null
           question: string
+          set_id?: string | null
           times_correct?: number | null
           times_reviewed?: number | null
           user_id: string
@@ -83,6 +123,7 @@ export type Database = {
           id?: string
           next_review_date?: string | null
           question?: string
+          set_id?: string | null
           times_correct?: number | null
           times_reviewed?: number | null
           user_id?: string
@@ -93,6 +134,13 @@ export type Database = {
             columns: ["document_id"]
             isOneToOne: false
             referencedRelation: "documents"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "flashcards_set_id_fkey"
+            columns: ["set_id"]
+            isOneToOne: false
+            referencedRelation: "flashcard_sets"
             referencedColumns: ["id"]
           },
         ]

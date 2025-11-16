@@ -156,10 +156,28 @@ serve(async (req) => {
     const flashcardsData = JSON.parse(toolCall.function.arguments);
     const flashcards = flashcardsData.flashcards;
 
-    // Insert flashcards into database
+    // Create flashcard set first
+    const setTitle = `${document.title} - ${difficulty === 'mixed' ? 'Mixed' : difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} (${flashcards.length} cards)`;
+    const { data: flashcardSet, error: setError } = await supabaseClient
+      .from('flashcard_sets')
+      .insert({
+        user_id: user.id,
+        document_id: documentId,
+        title: setTitle,
+        card_count: flashcards.length,
+        difficulty: difficulty
+      })
+      .select()
+      .single();
+
+    if (setError) throw setError;
+    console.log('Created flashcard set:', flashcardSet.id);
+
+    // Insert flashcards into database with set_id
     const flashcardsToInsert = flashcards.map((card: any) => ({
       user_id: user.id,
       document_id: documentId,
+      set_id: flashcardSet.id,
       question: card.question,
       answer: card.answer,
       difficulty: card.difficulty,
