@@ -111,11 +111,13 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator that creates effective study flashcards. Generate ${count} flashcards from the provided document content. ${difficulty === 'mixed' ? 'Use a mix of easy, medium, and hard difficulties.' : `Focus on ${difficulty} difficulty level.`} Focus on key concepts, definitions, and important facts from the CONTENT itself. DO NOT create questions about the document type, format, or meta-information (like "what is this document about" or "what kind of file is this"). Only create questions that test understanding of the actual subject matter and learning material within the document. CRITICAL: Generate all flashcards in ${detectedLanguage}. The questions AND answers must be in ${detectedLanguage}.`
+            content: `You are an expert educator that creates effective study flashcards. Generate ${count} flashcards from the provided document content. ${difficulty === 'mixed' ? 'Use a mix of easy, medium, and hard difficulties.' : `Focus on ${difficulty} difficulty level.`} Focus on key concepts, definitions, and important facts from the CONTENT itself. DO NOT create questions about the document type, format, or meta-information (like "what is this document about" or "what kind of file is this"). Only create questions that test understanding of the actual subject matter and learning material within the document.
+            
+ABSOLUTELY CRITICAL INSTRUCTION: You MUST generate ALL flashcards EXCLUSIVELY in ${detectedLanguage}. Every single word in both questions AND answers MUST be in ${detectedLanguage}. Do NOT use English or any other language. The entire output must be in ${detectedLanguage} language only.`
           },
           {
             role: 'user',
-            content: `Generate flashcards from this document titled "${document.title}":\n\n${contentToUse.substring(0, 50000)}`
+            content: `Generate flashcards from this document titled "${document.title}". Remember: ALL content must be in ${detectedLanguage} language.\n\n${contentToUse.substring(0, 50000)}`
           }
         ],
         tools: [{

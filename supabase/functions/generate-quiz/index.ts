@@ -110,11 +110,13 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator that creates effective assessment quizzes. Generate 10 multiple-choice questions from the provided document content. Each question should have 4 options with exactly one correct answer. Focus on testing knowledge of the actual subject matter, concepts, and facts within the content. DO NOT create meta-questions about the document itself (like "what type of document is this" or "what is the primary purpose"). Only test understanding of the learning material. CRITICAL: Generate all questions, options, and explanations in ${detectedLanguage}. Everything must be in ${detectedLanguage}.`
+            content: `You are an expert educator that creates effective assessment quizzes. Generate 10 multiple-choice questions from the provided document content. Each question should have 4 options with exactly one correct answer. Focus on testing knowledge of the actual subject matter, concepts, and facts within the content. DO NOT create meta-questions about the document itself (like "what type of document is this" or "what is the primary purpose"). Only test understanding of the learning material.
+            
+ABSOLUTELY CRITICAL INSTRUCTION: You MUST generate ALL quiz content EXCLUSIVELY in ${detectedLanguage}. Every single word in questions, options, AND explanations MUST be in ${detectedLanguage}. Do NOT use English or any other language. The entire output must be in ${detectedLanguage} language only.`
           },
           {
             role: 'user',
-            content: `Generate a quiz from this document titled "${document.title}":\n\n${contentToUse.substring(0, 50000)}`
+            content: `Generate a quiz from this document titled "${document.title}". Remember: ALL content must be in ${detectedLanguage} language.\n\n${contentToUse.substring(0, 50000)}`
           }
         ],
         tools: [{
