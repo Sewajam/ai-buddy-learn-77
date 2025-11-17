@@ -141,10 +141,17 @@ export default function QuizTaker({ quiz, onComplete }: QuizTakerProps) {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>{quiz.title}</CardTitle>
-          <CardDescription>
-            Question {currentQuestion + 1} of {questions.length}
-          </CardDescription>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>{quiz.title}</CardTitle>
+              <CardDescription>
+                Question {currentQuestion + 1} of {questions.length}
+              </CardDescription>
+            </div>
+            <Button variant="outline" onClick={onComplete}>
+              Exit Quiz
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <div>
