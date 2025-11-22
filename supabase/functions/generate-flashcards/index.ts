@@ -84,17 +84,42 @@ serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
+        model: 'openai/gpt-5-mini',
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator that creates effective study flashcards. Generate ${count} flashcards from the provided document content. ${difficulty === 'mixed' ? 'Use a mix of easy, medium, and hard difficulties.' : `Focus on ${difficulty} difficulty level.`} Focus on key concepts, definitions, and important facts from the CONTENT itself. DO NOT create questions about the document type, format, or meta-information (like "what is this document about" or "what kind of file is this"). Only create questions that test understanding of the actual subject matter and learning material within the document.
-            
-CRITICAL LANGUAGE RULE: You MUST keep the exact same language(s) as in the provided content. Do NOT translate anything. If the text is in Italian, stay in Italian; if it's in German, stay in German; if it's mixed, keep that mix. NEVER switch to English or any other language.`
+            content: `You are an expert educator that creates effective study flashcards.
+
+Your job is to generate exactly ${count} high‑quality flashcards ONLY about the actual learning content of the document.
+
+STRICT CONTENT RULES:
+- Questions must be directly answerable from the document CONTENT itself.
+- DO NOT ask about: the file type, format, number of pages, language of the file, metadata, or "what this document is about" in general.
+- DO NOT create questions about instructions, headers like "Table of contents", or technical export info.
+- Focus on key concepts, definitions, theorems, formulas, dates, names, and important explanations.
+- Each question must be specific and concrete, never vague or meta.
+
+DIFFICULTY RULES:
+- If difficulty is "mixed", use a balanced mix of easy, medium, and hard.
+- Otherwise, focus on the requested difficulty level.
+
+CRITICAL LANGUAGE RULE:
+- You MUST keep the exact same language(s) as in the provided content.
+- Do NOT translate anything.
+- If the text is in German, stay in German; if it's in English, stay in English; if it's mixed, preserve the mix.
+- NEVER switch to Italian or English unless the original text is in that language.
+- Copy technical terms exactly as written in the document.`
           },
           {
             role: 'user',
-            content: `Generate flashcards from this document titled "${document.title}". Do NOT translate; keep the original language of the text exactly as written.\n\n${contentToUse.substring(0, 50000)}`
+            content: `Generate flashcards from this document titled "${document.title}".
+
+Requirements:
+- Do NOT translate; keep the original language of the text exactly as written.
+- Do NOT include any questions about file type, language, or metadata.
+- ONLY create questions about the subject‑matter content that a student should learn.
+
+Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
           }
         ],
         tools: [{
