@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, ChevronRight, ArrowLeft, BookOpen } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ArrowLeft, BookOpen, Trash2 } from 'lucide-react';
 
 interface Flashcard {
   id: string;
@@ -21,9 +21,10 @@ interface FlashcardSet {
 
 interface FlashcardViewerProps {
   flashcards: FlashcardSet[];
+  onDelete?: (setId: string) => void;
 }
 
-export default function FlashcardViewer({ flashcards }: FlashcardViewerProps) {
+export default function FlashcardViewer({ flashcards, onDelete }: FlashcardViewerProps) {
   const [selectedSet, setSelectedSet] = useState<FlashcardSet | null>(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showAnswer, setShowAnswer] = useState(false);
@@ -34,23 +35,49 @@ export default function FlashcardViewer({ flashcards }: FlashcardViewerProps) {
         {flashcards.map((set) => (
           <Card 
             key={set.id} 
-            className="hover:shadow-lg transition-shadow cursor-pointer"
-            onClick={() => {
-              setSelectedSet(set);
-              setCurrentIndex(0);
-              setShowAnswer(false);
-            }}
+            className="hover:shadow-lg transition-shadow"
           >
             <CardHeader>
-              <CardTitle className="text-lg flex items-center gap-2">
-                <BookOpen className="h-5 w-5" />
-                {set.title}
-              </CardTitle>
-              <CardDescription>
-                {set.card_count} cards • Created {new Date(set.created_at).toLocaleDateString()}
-              </CardDescription>
+              <div className="flex items-start justify-between">
+                <div 
+                  className="flex-1 cursor-pointer"
+                  onClick={() => {
+                    setSelectedSet(set);
+                    setCurrentIndex(0);
+                    setShowAnswer(false);
+                  }}
+                >
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <BookOpen className="h-5 w-5" />
+                    {set.title}
+                  </CardTitle>
+                  <CardDescription>
+                    {set.card_count} cards • Created {new Date(set.created_at).toLocaleDateString()}
+                  </CardDescription>
+                </div>
+                {onDelete && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete(set.id);
+                    }}
+                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
             </CardHeader>
-            <CardContent>
+            <CardContent 
+              className="cursor-pointer"
+              onClick={() => {
+                setSelectedSet(set);
+                setCurrentIndex(0);
+                setShowAnswer(false);
+              }}
+            >
               <div className="flex items-center gap-2">
                 <span className={`text-xs px-2 py-1 rounded ${
                   set.difficulty === 'easy' ? 'bg-green-100 text-green-800' :
