@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { Upload, BookOpen, FileText, Trophy, LogOut } from 'lucide-react';
+import { Upload, BookOpen, FileText, Trophy, LogOut, Trash2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import FlashcardGenerator from '@/components/FlashcardGenerator';
@@ -126,6 +126,89 @@ export default function Dashboard() {
         title: "Error", 
         description: error.message || "Failed to create quiz",
         variant: "destructive" 
+      });
+    }
+  };
+
+  const handleDeleteDocument = async (documentId: string, filePath: string) => {
+    try {
+      const { error: storageError } = await supabase.storage
+        .from('documents')
+        .remove([filePath]);
+
+      if (storageError) throw storageError;
+
+      const { error: dbError } = await supabase
+        .from('documents')
+        .delete()
+        .eq('id', documentId);
+
+      if (dbError) throw dbError;
+
+      toast({
+        title: "Document deleted",
+        description: "Document and associated content removed",
+      });
+
+      fetchDocuments();
+      fetchFlashcards();
+      fetchQuizzes();
+    } catch (error: any) {
+      console.error('Delete error:', error);
+      toast({
+        title: "Delete failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleDeleteFlashcardSet = async (setId: string) => {
+    try {
+      const { error } = await supabase
+        .from('flashcard_sets')
+        .delete()
+        .eq('id', setId);
+
+      if (error) throw error;
+
+      toast({
+        title: "Flashcard set deleted",
+        description: "Flashcard set removed successfully",
+      });
+
+      fetchFlashcards();
+    } catch (error: any) {
+      console.error('Delete error:', error);
+      toast({
+        title: "Delete failed",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleDeleteQuiz = async (quizId: string) => {
+    try {
+      const { error } = await supabase
+        .from('quizzes')
+        .delete()
+        .eq('id', quizId);
+
+      if (error) throw error;
+
+      toast({
+        title: "Quiz deleted",
+        description: "Quiz removed successfully",
+      });
+
+      fetchQuizzes();
+    } catch (error: any) {
+      console.error('Delete error:', error);
+      toast({
+        title: "Delete failed",
+        description: error.message,
+        variant: "destructive",
       });
     }
   };
@@ -258,10 +341,22 @@ export default function Dashboard() {
               {documents.map((doc) => (
                 <Card key={doc.id} className="hover:shadow-lg transition-shadow">
                   <CardHeader>
-                    <CardTitle className="text-lg truncate">{doc.title}</CardTitle>
-                    <CardDescription>
-                      Uploaded {new Date(doc.created_at).toLocaleDateString()}
-                    </CardDescription>
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0">
+                        <CardTitle className="text-lg truncate">{doc.title}</CardTitle>
+                        <CardDescription>
+                          Uploaded {new Date(doc.created_at).toLocaleDateString()}
+                        </CardDescription>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleDeleteDocument(doc.id, doc.file_path)}
+                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </CardHeader>
                   <CardContent className="space-y-2">
                     <FlashcardGenerator
@@ -302,7 +397,7 @@ export default function Dashboard() {
                 </CardContent>
               </Card>
             ) : (
-              <FlashcardViewer flashcards={flashcards} />
+              <FlashcardViewer flashcards={flashcards} onDelete={handleDeleteFlashcardSet} />
             )}
           </TabsContent>
 
@@ -326,10 +421,22 @@ export default function Dashboard() {
                 {quizzes.map((quiz) => (
                   <Card key={quiz.id} className="hover:shadow-lg transition-shadow">
                     <CardHeader>
-                      <CardTitle>{quiz.title}</CardTitle>
-                      <CardDescription>
-                        Created {new Date(quiz.created_at).toLocaleDateString()}
-                      </CardDescription>
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <CardTitle>{quiz.title}</CardTitle>
+                          <CardDescription>
+                            Created {new Date(quiz.created_at).toLocaleDateString()}
+                          </CardDescription>
+                        </div>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleDeleteQuiz(quiz.id)}
+                          className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </CardHeader>
                     <CardContent>
                       <p className="text-sm text-muted-foreground mb-4">
