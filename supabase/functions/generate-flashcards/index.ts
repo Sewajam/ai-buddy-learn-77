@@ -68,33 +68,10 @@ serve(async (req) => {
       console.log('Using pages', startPage || 1, 'to', endPage || pages.length, 'Content length:', contentToUse.length);
     }
 
-    // Detect document language
-    const languageDetectResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${Deno.env.get('LOVABLE_API_KEY')}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages: [
-          {
-            role: 'user',
-            content: `Detect the primary language of this text and respond with ONLY the language name in English (e.g., "English", "Spanish", "French", "German", etc.):\n\n${contentToUse.substring(0, 2000)}`
-          }
-        ]
-      })
-    });
-
-    if (!languageDetectResponse.ok) {
-      const errorText = await languageDetectResponse.text();
-      console.error('Language detection error:', languageDetectResponse.status, errorText);
-      throw new Error(`AI service temporarily unavailable. Please try again in a moment.`);
-    }
-
-    const langData = await languageDetectResponse.json();
-    const detectedLanguage = langData.choices[0].message.content.trim();
-    console.log('Detected language:', detectedLanguage);
+    // We no longer perform separate language detection.
+    // Instead, we tell the AI to ALWAYS keep the original document language
+    // and NEVER translate the content to another language.
+    console.log('Language detection skipped; using original document language.');
 
     // Call Lovable AI to generate flashcards
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
@@ -113,11 +90,11 @@ serve(async (req) => {
             role: 'system',
             content: `You are an expert educator that creates effective study flashcards. Generate ${count} flashcards from the provided document content. ${difficulty === 'mixed' ? 'Use a mix of easy, medium, and hard difficulties.' : `Focus on ${difficulty} difficulty level.`} Focus on key concepts, definitions, and important facts from the CONTENT itself. DO NOT create questions about the document type, format, or meta-information (like "what is this document about" or "what kind of file is this"). Only create questions that test understanding of the actual subject matter and learning material within the document.
             
-ABSOLUTELY CRITICAL INSTRUCTION: You MUST generate ALL flashcards EXCLUSIVELY in ${detectedLanguage}. Every single word in both questions AND answers MUST be in ${detectedLanguage}. Do NOT use English or any other language. The entire output must be in ${detectedLanguage} language only.`
+CRITICAL LANGUAGE RULE: You MUST keep the exact same language(s) as in the provided content. Do NOT translate anything. If the text is in Italian, stay in Italian; if it's in German, stay in German; if it's mixed, keep that mix. NEVER switch to English or any other language.`
           },
           {
             role: 'user',
-            content: `Generate flashcards from this document titled "${document.title}". Remember: ALL content must be in ${detectedLanguage} language.\n\n${contentToUse.substring(0, 50000)}`
+            content: `Generate flashcards from this document titled "${document.title}". Do NOT translate; keep the original language of the text exactly as written.\n\n${contentToUse.substring(0, 50000)}`
           }
         ],
         tools: [{
