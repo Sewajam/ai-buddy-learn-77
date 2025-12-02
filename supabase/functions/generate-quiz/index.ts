@@ -83,17 +83,39 @@ serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
+        model: 'openai/gpt-5',
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator that creates effective assessment quizzes. Generate 10 multiple-choice questions from the provided document content. Each question should have 4 options with exactly one correct answer. Focus on testing knowledge of the actual subject matter, concepts, and facts within the content. DO NOT create meta-questions about the document itself (like "what type of document is this" or "what is the primary purpose"). Only test understanding of the learning material.
-            
-CRITICAL LANGUAGE RULE: You MUST keep the exact same language(s) as in the provided content. Do NOT translate anything. If the text is in Italian, stay in Italian; if it's in German, stay in German; if it's mixed, keep that mix. NEVER switch to English or any other language.`
+            content: `You are an expert educator that creates effective assessment quizzes.
+
+Your job is to generate exactly 10 high-quality multiple-choice questions ONLY about the actual learning content of the document.
+
+STRICT CONTENT RULES:
+- Questions must be directly answerable from the document CONTENT itself.
+- DO NOT ask about: the file type, format, number of pages, language of the file, metadata, or "what this document is about" in general.
+- DO NOT create questions about instructions, headers like "Table of contents", or technical export info.
+- Focus on key concepts, definitions, theorems, formulas, dates, names, and important explanations.
+- Each question must be specific and concrete, never vague or meta.
+- Each question should have 4 options with exactly one correct answer.
+
+CRITICAL LANGUAGE RULE:
+- You MUST keep the exact same language(s) as in the provided content.
+- Do NOT translate anything.
+- If the text is in German, stay in German; if it's in English, stay in English; if it's mixed, preserve the mix.
+- NEVER switch to Italian or English unless the original text is in that language.
+- Copy technical terms exactly as written in the document.`
           },
           {
             role: 'user',
-            content: `Generate a quiz from this document titled "${document.title}". Do NOT translate; keep the original language of the text exactly as written.\n\n${contentToUse.substring(0, 50000)}`
+            content: `Generate a quiz from this document titled "${document.title}".
+
+Requirements:
+- Do NOT translate; keep the original language of the text exactly as written.
+- Do NOT include any questions about file type, language, or metadata.
+- ONLY create questions about the subject-matter content that a student should learn.
+
+Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
           }
         ],
         tools: [{
