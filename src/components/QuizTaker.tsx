@@ -31,8 +31,27 @@ export default function QuizTaker({ quiz, onComplete }: QuizTakerProps) {
   const [showResults, setShowResults] = useState(false);
   const { toast } = useToast();
 
-  const questions = quiz.questions || [];
+  const questions = Array.isArray(quiz.questions) ? quiz.questions : [];
   const question = questions[currentQuestion];
+
+  // Handle empty questions
+  if (questions.length === 0) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>No Questions Available</CardTitle>
+          <CardDescription>
+            This quiz has no questions. The AI may have failed to generate content from the document.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button onClick={onComplete} className="w-full">
+            Back to Quizzes
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
 
   const handleAnswerSelect = (answerIndex: number) => {
     const newAnswers = [...selectedAnswers];

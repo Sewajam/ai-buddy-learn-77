@@ -163,12 +163,39 @@ Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
 
     const aiData = await aiResponse.json();
     console.log('AI response received');
+    console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
     
-    const toolCall = aiData.choices[0].message.tool_calls?.[0];
-    if (!toolCall) throw new Error('No quiz generated');
+    const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
+    if (!toolCall) {
+      console.error('No tool call found in response');
+      throw new Error('No quiz generated - AI did not return expected format');
+    }
 
-    const quizData = JSON.parse(toolCall.function.arguments);
-    const questions = quizData.questions;
+    console.log('Tool call arguments:', toolCall.function.arguments.substring(0, 1000));
+    
+    let quizData;
+    try {
+      quizData = JSON.parse(toolCall.function.arguments);
+    } catch (parseError) {
+      console.error('Failed to parse tool call arguments:', parseError);
+      throw new Error('Failed to parse quiz data from AI');
+    }
+    
+    const questions = quizData.questions || [];
+    
+    if (!Array.isArray(questions) || questions.length === 0) {
+      console.error('No questions generated. Quiz data:', JSON.stringify(quizData));
+      throw new Error('AI failed to generate quiz questions. Please try again.');
+    }
+    
+    // Validate each question has required fields
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+      if (!q.question || !Array.isArray(q.options) || q.options.length < 2 || typeof q.correctIndex !== 'number') {
+        console.error(`Invalid question at index ${i}:`, JSON.stringify(q));
+        throw new Error(`Invalid question format at index ${i}`);
+      }
+    }
 
     // Insert quiz into database
     const { data: quiz, error: insertError } = await supabaseClient
