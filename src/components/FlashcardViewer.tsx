@@ -95,7 +95,36 @@ export default function FlashcardViewer({ flashcards, onDelete }: FlashcardViewe
     );
   }
 
-  const currentCard = selectedSet.flashcards[currentIndex];
+  const currentCard = selectedSet.flashcards?.[currentIndex];
+
+  // Handle empty flashcards
+  if (!currentCard) {
+    return (
+      <div className="space-y-4">
+        <Button 
+          variant="outline" 
+          onClick={() => setSelectedSet(null)}
+          className="mb-4"
+        >
+          <ArrowLeft className="h-4 w-4 mr-2" />
+          Back to Sets
+        </Button>
+        <Card>
+          <CardHeader>
+            <CardTitle>No Flashcards Available</CardTitle>
+            <CardDescription>
+              This set has no flashcards or they failed to load.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button onClick={() => setSelectedSet(null)} className="w-full">
+              Back to Sets
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   const handleNext = () => {
     if (currentIndex < selectedSet.flashcards.length - 1) {
