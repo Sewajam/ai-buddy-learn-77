@@ -159,12 +159,45 @@ Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
 
     const aiData = await aiResponse.json();
     console.log('AI response received');
+    console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
     
-    const toolCall = aiData.choices[0].message.tool_calls?.[0];
-    if (!toolCall) throw new Error('No flashcards generated');
+    const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
+    if (!toolCall) {
+      console.error('No tool call found in response');
+      throw new Error('No flashcards generated - AI did not return expected format');
+    }
 
-    const flashcardsData = JSON.parse(toolCall.function.arguments);
-    const flashcards = flashcardsData.flashcards;
+    console.log('Tool call arguments:', toolCall.function.arguments.substring(0, 1000));
+    
+    let flashcardsData;
+    try {
+      flashcardsData = JSON.parse(toolCall.function.arguments);
+    } catch (parseError) {
+      console.error('Failed to parse tool call arguments:', parseError);
+      throw new Error('Failed to parse flashcard data from AI');
+    }
+    
+    const flashcards = flashcardsData.flashcards || [];
+    
+    if (!Array.isArray(flashcards) || flashcards.length === 0) {
+      console.error('No flashcards generated. Data:', JSON.stringify(flashcardsData));
+      throw new Error('AI failed to generate flashcards. Please try again.');
+    }
+    
+    // Validate each flashcard has required fields
+    for (let i = 0; i < flashcards.length; i++) {
+      const card = flashcards[i];
+      if (!card.question || !card.answer) {
+        console.error(`Invalid flashcard at index ${i}:`, JSON.stringify(card));
+        throw new Error(`Invalid flashcard format at index ${i}`);
+      }
+      // Default difficulty if missing
+      if (!card.difficulty) {
+        card.difficulty = 'medium';
+      }
+    }
+    
+    console.log(`Validated ${flashcards.length} flashcards`);
 
     // Create flashcard set first
     const setTitle = `${document.title} - ${difficulty === 'mixed' ? 'Mixed' : difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} (${flashcards.length} cards)`;
