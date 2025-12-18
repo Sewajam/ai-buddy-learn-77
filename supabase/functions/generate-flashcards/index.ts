@@ -77,6 +77,14 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
+    // Truncate content to reasonable size for AI processing
+    const truncatedContent = contentToUse.substring(0, 30000);
+    console.log('Truncated content length:', truncatedContent.length);
+
+    const difficultyInstruction = difficulty === 'mixed' 
+      ? 'Mix of easy, medium, and hard questions'
+      : `Focus on ${difficulty} difficulty questions`;
+
     const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -84,49 +92,22 @@ serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'openai/gpt-5',
+        model: 'google/gemini-2.5-flash',
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator that creates effective study flashcards.
-
-Your job is to generate exactly ${count} high‑quality flashcards ONLY about the actual learning content of the document.
-
-STRICT CONTENT RULES:
-- Questions must be directly answerable from the document CONTENT itself.
-- DO NOT ask about: the file type, format, number of pages, language of the file, metadata, or "what this document is about" in general.
-- DO NOT create questions about instructions, headers like "Table of contents", or technical export info.
-- Focus on key concepts, definitions, theorems, formulas, dates, names, and important explanations.
-- Each question must be specific and concrete, never vague or meta.
-
-DIFFICULTY RULES:
-- If difficulty is "mixed", use a balanced mix of easy, medium, and hard.
-- Otherwise, focus on the requested difficulty level.
-
-CRITICAL LANGUAGE RULE:
-- You MUST keep the exact same language(s) as in the provided content.
-- Do NOT translate anything.
-- If the text is in German, stay in German; if it's in English, stay in English; if it's mixed, preserve the mix.
-- NEVER switch to Italian or English unless the original text is in that language.
-- Copy technical terms exactly as written in the document.`
+            content: `You are an expert educator creating study flashcards. Generate exactly ${count} flashcards from the provided document content. ${difficultyInstruction}. Keep the same language as the document - do not translate. Focus on key concepts, definitions, and important facts.`
           },
           {
             role: 'user',
-            content: `Generate flashcards from this document titled "${document.title}".
-
-Requirements:
-- Do NOT translate; keep the original language of the text exactly as written.
-- Do NOT include any questions about file type, language, or metadata.
-- ONLY create questions about the subject‑matter content that a student should learn.
-
-Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
+            content: `Create ${count} flashcards from this document titled "${document.title}":\n\n${truncatedContent}`
           }
         ],
         tools: [{
           type: 'function',
           function: {
             name: 'create_flashcards',
-            description: 'Create a set of flashcards from document content',
+            description: 'Create study flashcards from the document',
             parameters: {
               type: 'object',
               properties: {
@@ -135,12 +116,13 @@ Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
                   items: {
                     type: 'object',
                     properties: {
-                      question: { type: 'string', description: 'The question or prompt' },
-                      answer: { type: 'string', description: 'The answer or explanation' },
+                      question: { type: 'string', description: 'The flashcard question' },
+                      answer: { type: 'string', description: 'The answer' },
                       difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] }
                     },
                     required: ['question', 'answer', 'difficulty']
-                  }
+                  },
+                  minItems: 1
                 }
               },
               required: ['flashcards']
