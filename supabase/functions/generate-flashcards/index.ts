@@ -96,11 +96,26 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator creating study flashcards. Generate exactly ${count} flashcards from the provided document content. ${difficultyInstruction}. Keep the same language as the document - do not translate. Focus on key concepts, definitions, and important facts.`
+            content: `You are an expert educator creating study flashcards. Generate exactly ${count} flashcards.
+
+FLASHCARD FORMAT RULES:
+- Each flashcard must be a direct question that prompts recall (e.g., "What is...?", "Define...", "Explain...")
+- Questions should NOT be multiple choice or quiz-style with options
+- Questions should be open-ended, requiring the student to recall the answer from memory
+- Answers should be clear and concise explanations
+
+LANGUAGE RULES (CRITICAL):
+- ALL flashcards (easy, medium, AND hard) MUST be in the SAME language as the document
+- If the document is in Dutch, ALL questions and answers must be in Dutch
+- If the document is in German, ALL questions and answers must be in German
+- NEVER translate or switch to English regardless of difficulty level
+- Copy technical terms exactly as they appear in the document
+
+DIFFICULTY: ${difficultyInstruction}`
           },
           {
             role: 'user',
-            content: `Create ${count} flashcards from this document titled "${document.title}":\n\n${truncatedContent}`
+            content: `Create ${count} flashcards from this document titled "${document.title}". Remember: ALL flashcards must be in the same language as the document content below. Use direct recall questions, not multiple choice.\n\n${truncatedContent}`
           }
         ],
         tools: [{
