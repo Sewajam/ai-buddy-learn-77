@@ -79,7 +79,6 @@ serve(async (req) => {
 
     // Sample random chunks from throughout the document for better coverage
     const MAX_CONTENT_SIZE = 30000;
-    const CHUNK_SIZE = 3000; // Size of each random chunk
     let sampledContent = '';
     
     if (contentToUse.length <= MAX_CONTENT_SIZE) {
@@ -94,40 +93,24 @@ serve(async (req) => {
         // Few sections - just take first MAX_CONTENT_SIZE chars
         sampledContent = contentToUse.substring(0, MAX_CONTENT_SIZE);
       } else {
-        // Shuffle sections randomly and pick from throughout the document
-        const shuffledIndices: number[] = [];
-        const sectionCount = sections.length;
-        
-        // Create array of indices and shuffle using Fisher-Yates
-        for (let i = 0; i < sectionCount; i++) {
-          shuffledIndices.push(i);
-        }
-        for (let i = shuffledIndices.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [shuffledIndices[i], shuffledIndices[j]] = [shuffledIndices[j], shuffledIndices[i]];
-        }
-        
-        // Pick sections until we reach the size limit
-        const selectedSections: { index: number; content: string }[] = [];
+        // Sample evenly from throughout the document (not just random)
+        // Divide document into equal parts and take sections from each part
+        const numSamples = Math.min(80, sections.length);
+        const step = sections.length / numSamples;
+        const selectedSections: string[] = [];
         let totalSize = 0;
         
-        for (const idx of shuffledIndices) {
+        for (let i = 0; i < numSamples && totalSize < MAX_CONTENT_SIZE; i++) {
+          const idx = Math.floor(i * step);
           const section = sections[idx];
-          if (totalSize + section.length > MAX_CONTENT_SIZE) {
-            if (selectedSections.length >= 5) break; // Have enough sections
-            continue;
+          if (section && totalSize + section.length <= MAX_CONTENT_SIZE) {
+            selectedSections.push(section);
+            totalSize += section.length;
           }
-          selectedSections.push({ index: idx, content: section });
-          totalSize += section.length;
         }
         
-        // Sort selected sections by original index to maintain some coherence
-        selectedSections.sort((a, b) => a.index - b.index);
-        
-        // Add section markers to help AI understand these are from different parts
-        sampledContent = selectedSections.map((s, i) => 
-          `[Section ${i + 1} from document]\n${s.content}`
-        ).join('\n\n---\n\n');
+        // Join sections without any markers - just the raw content
+        sampledContent = selectedSections.join('\n\n');
         
         console.log('Sampled', selectedSections.length, 'sections from throughout document');
       }
@@ -150,32 +133,18 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator creating study flashcards. Generate exactly ${count} flashcards.
+            content: `You are creating ${count} study flashcards. Difficulty: ${difficultyInstruction}.
 
-CONTENT COVERAGE RULES (CRITICAL):
-- The document has been sampled from DIFFERENT SECTIONS throughout the entire document
-- You MUST create flashcards covering ALL provided sections, not just the first ones
-- Spread your questions evenly across all sections provided
-- Each section marker like "[Section X from document]" indicates content from a different part
-
-FLASHCARD FORMAT RULES:
-- Each flashcard must be a direct question that prompts recall (e.g., "What is...?", "Define...", "Explain...")
-- Questions should NOT be multiple choice or quiz-style with options
-- Questions should be open-ended, requiring the student to recall the answer from memory
-- Answers should be clear and concise explanations
-
-LANGUAGE RULES (CRITICAL):
-- ALL flashcards (easy, medium, AND hard) MUST be in the SAME language as the document
-- If the document is in Dutch, ALL questions and answers must be in Dutch
-- If the document is in German, ALL questions and answers must be in German
-- NEVER translate or switch to English regardless of difficulty level
-- Copy technical terms exactly as they appear in the document
-
-DIFFICULTY: ${difficultyInstruction}`
+RULES:
+1. Create questions ONLY about the study material content provided - never about instructions or meta-information
+2. Use direct recall questions (What is...? Define... Explain... How does...?)
+3. NO multiple choice questions
+4. ALL questions and answers must be in the SAME language as the study material
+5. Spread questions across different topics in the material`
           },
           {
             role: 'user',
-            content: `Create ${count} flashcards from this document titled "${document.title}". The content below is sampled from DIFFERENT PARTS of the document - make sure to create questions from ALL sections, not just the beginning. Remember: ALL flashcards must be in the same language as the document content. Use direct recall questions, not multiple choice.\n\n${sampledContent}`
+            content: `STUDY MATERIAL TO CREATE FLASHCARDS FROM (document: "${document.title}"):\n\n${sampledContent}`
           }
         ],
         tools: [{
