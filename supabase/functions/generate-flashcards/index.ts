@@ -77,9 +77,63 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
-    // Truncate content to reasonable size for AI processing
-    const truncatedContent = contentToUse.substring(0, 30000);
-    console.log('Truncated content length:', truncatedContent.length);
+    // Sample random chunks from throughout the document for better coverage
+    const MAX_CONTENT_SIZE = 30000;
+    const CHUNK_SIZE = 3000; // Size of each random chunk
+    let sampledContent = '';
+    
+    if (contentToUse.length <= MAX_CONTENT_SIZE) {
+      // If document is small enough, use it all
+      sampledContent = contentToUse;
+    } else {
+      // Split content into logical sections (paragraphs or page-like chunks)
+      const sections = contentToUse.split(/\n{2,}|\f/).filter(s => s.trim().length > 100);
+      console.log('Total sections found:', sections.length);
+      
+      if (sections.length <= 10) {
+        // Few sections - just take first MAX_CONTENT_SIZE chars
+        sampledContent = contentToUse.substring(0, MAX_CONTENT_SIZE);
+      } else {
+        // Shuffle sections randomly and pick from throughout the document
+        const shuffledIndices: number[] = [];
+        const sectionCount = sections.length;
+        
+        // Create array of indices and shuffle using Fisher-Yates
+        for (let i = 0; i < sectionCount; i++) {
+          shuffledIndices.push(i);
+        }
+        for (let i = shuffledIndices.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [shuffledIndices[i], shuffledIndices[j]] = [shuffledIndices[j], shuffledIndices[i]];
+        }
+        
+        // Pick sections until we reach the size limit
+        const selectedSections: { index: number; content: string }[] = [];
+        let totalSize = 0;
+        
+        for (const idx of shuffledIndices) {
+          const section = sections[idx];
+          if (totalSize + section.length > MAX_CONTENT_SIZE) {
+            if (selectedSections.length >= 5) break; // Have enough sections
+            continue;
+          }
+          selectedSections.push({ index: idx, content: section });
+          totalSize += section.length;
+        }
+        
+        // Sort selected sections by original index to maintain some coherence
+        selectedSections.sort((a, b) => a.index - b.index);
+        
+        // Add section markers to help AI understand these are from different parts
+        sampledContent = selectedSections.map((s, i) => 
+          `[Section ${i + 1} from document]\n${s.content}`
+        ).join('\n\n---\n\n');
+        
+        console.log('Sampled', selectedSections.length, 'sections from throughout document');
+      }
+    }
+    
+    console.log('Sampled content length:', sampledContent.length);
 
     const difficultyInstruction = difficulty === 'mixed' 
       ? 'Mix of easy, medium, and hard questions'
@@ -98,6 +152,12 @@ serve(async (req) => {
             role: 'system',
             content: `You are an expert educator creating study flashcards. Generate exactly ${count} flashcards.
 
+CONTENT COVERAGE RULES (CRITICAL):
+- The document has been sampled from DIFFERENT SECTIONS throughout the entire document
+- You MUST create flashcards covering ALL provided sections, not just the first ones
+- Spread your questions evenly across all sections provided
+- Each section marker like "[Section X from document]" indicates content from a different part
+
 FLASHCARD FORMAT RULES:
 - Each flashcard must be a direct question that prompts recall (e.g., "What is...?", "Define...", "Explain...")
 - Questions should NOT be multiple choice or quiz-style with options
@@ -115,7 +175,7 @@ DIFFICULTY: ${difficultyInstruction}`
           },
           {
             role: 'user',
-            content: `Create ${count} flashcards from this document titled "${document.title}". Remember: ALL flashcards must be in the same language as the document content below. Use direct recall questions, not multiple choice.\n\n${truncatedContent}`
+            content: `Create ${count} flashcards from this document titled "${document.title}". The content below is sampled from DIFFERENT PARTS of the document - make sure to create questions from ALL sections, not just the beginning. Remember: ALL flashcards must be in the same language as the document content. Use direct recall questions, not multiple choice.\n\n${sampledContent}`
           }
         ],
         tools: [{
