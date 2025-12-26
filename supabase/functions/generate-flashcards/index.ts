@@ -60,12 +60,14 @@ serve(async (req) => {
     // Extract page range if specified
     let contentToUse = content;
     if (startPage || endPage) {
-      // Simple heuristic: split by form feed or multiple newlines as page breaks
-      const pages = content.split(/\f|\n{5,}/);
-      const start = startPage ? startPage - 1 : 0;
-      const end = endPage ? endPage : pages.length;
-      contentToUse = pages.slice(start, end).join('\n\n');
-      console.log('Using pages', startPage || 1, 'to', endPage || pages.length, 'Content length:', contentToUse.length);
+      // Estimate pages: ~3000 chars per page for PDFs/text documents
+      const CHARS_PER_PAGE = 3000;
+      const totalEstimatedPages = Math.ceil(content.length / CHARS_PER_PAGE);
+      const start = Math.max(0, ((startPage || 1) - 1) * CHARS_PER_PAGE);
+      const end = Math.min(content.length, (endPage || totalEstimatedPages) * CHARS_PER_PAGE);
+      contentToUse = content.substring(start, end);
+      console.log('Page range requested:', startPage || 1, 'to', endPage || totalEstimatedPages);
+      console.log('Char range:', start, 'to', end, 'Content length:', contentToUse.length);
     }
 
     // We no longer perform separate language detection.
@@ -119,8 +121,8 @@ serve(async (req) => {
     console.log('Sampled content length:', sampledContent.length);
 
     const difficultyInstruction = difficulty === 'mixed' 
-      ? 'Mix of easy, medium, and hard questions'
-      : `Focus on ${difficulty} difficulty questions`;
+      ? 'Create a balanced mix: some easy (basic facts), some medium (connections), some hard (analysis)'
+      : `All ${difficulty} difficulty`;
 
     const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
@@ -133,18 +135,15 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `You are creating ${count} study flashcards. Difficulty: ${difficultyInstruction}.
+            content: `Create exactly ${count} flashcards. ${difficultyInstruction}.
 
-RULES:
-1. Create questions ONLY about the study material content provided - never about instructions or meta-information
-2. Use direct recall questions (What is...? Define... Explain... How does...?)
-3. NO multiple choice questions
-4. ALL questions and answers must be in the SAME language as the study material
-5. Spread questions across different topics in the material`
+CRITICAL: Only ask about the ACTUAL SUBJECT MATTER in the document. Never ask about documents, flashcards, systems, or meta-topics.
+
+Format: Direct Q&A only. Same language as the document.`
           },
           {
             role: 'user',
-            content: `STUDY MATERIAL TO CREATE FLASHCARDS FROM (document: "${document.title}"):\n\n${sampledContent}`
+            content: `Create flashcards about this content:\n\n---\n${sampledContent}\n---`
           }
         ],
         tools: [{
