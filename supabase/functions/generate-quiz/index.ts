@@ -7,6 +7,62 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Extract readable text from PDF binary data
+function extractTextFromPDF(binaryContent: string): string {
+  const textParts: string[] = [];
+  
+  // Method 1: Extract text from PDF text objects (Tj, TJ operators)
+  const tjMatches = binaryContent.match(/\(([^)]+)\)\s*Tj/g);
+  if (tjMatches) {
+    for (const match of tjMatches) {
+      const text = match.replace(/\(([^)]+)\)\s*Tj/, '$1');
+      if (text && /^[\x20-\x7E\s]+$/.test(text)) {
+        textParts.push(text);
+      }
+    }
+  }
+  
+  // Method 2: Extract readable ASCII sequences
+  const asciiMatches = binaryContent.match(/[\x20-\x7E]{20,}/g);
+  if (asciiMatches) {
+    for (const match of asciiMatches) {
+      if (!match.includes('stream') && 
+          !match.includes('endobj') && 
+          !match.includes('/Type') &&
+          !match.includes('/Font') &&
+          !match.includes('<<') &&
+          !match.includes('>>')) {
+        textParts.push(match);
+      }
+    }
+  }
+  
+  return textParts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// Check if content looks like binary/garbage
+function isBinaryContent(content: string): boolean {
+  const sample = content.substring(0, 1000);
+  let nonPrintable = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const code = sample.charCodeAt(i);
+    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
+      nonPrintable++;
+    }
+    if (code > 126) {
+      nonPrintable++;
+    }
+  }
+  return (nonPrintable / sample.length) > 0.1;
+}
+
+// Clean text content
+function cleanTextContent(content: string): string {
+  let cleaned = content.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ');
+  cleaned = cleaned.replace(/\s+/g, ' ');
+  return cleaned.trim();
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -46,35 +102,80 @@ serve(async (req) => {
     if (docError) throw docError;
     if (!document) throw new Error('Document not found');
 
-    // Download the file content
-    const { data: fileData, error: fileError } = await supabaseClient
-      .storage
-      .from('documents')
-      .download(document.file_path);
+    // Check if document has stored content first
+    let content = document.content || '';
+    
+    if (!content || content.length < 100) {
+      // Download the file content
+      const { data: fileData, error: fileError } = await supabaseClient
+        .storage
+        .from('documents')
+        .download(document.file_path);
 
-    if (fileError) throw fileError;
+      if (fileError) throw fileError;
 
-    const content = await fileData.text();
+      const rawContent = await fileData.text();
+      console.log('Raw file content length:', rawContent.length);
+      
+      // Check if content is binary (like a PDF)
+      if (isBinaryContent(rawContent)) {
+        console.log('Detected binary content, attempting text extraction...');
+        content = extractTextFromPDF(rawContent);
+        console.log('Extracted text length:', content.length);
+        
+        if (content.length < 100) {
+          throw new Error('Could not extract readable text from this PDF. Please upload a text-based document (.txt, .md) or a PDF with selectable text.');
+        }
+      } else {
+        content = cleanTextContent(rawContent);
+      }
+    }
+    
     console.log('Document content length:', content.length);
+    console.log('Content preview:', content.substring(0, 500));
+
+    // Verify we have actual readable content
+    if (content.length < 100) {
+      throw new Error('Document appears to be empty or unreadable. Please upload a text-based document.');
+    }
 
     // Extract page range if specified
     let contentToUse = content;
     if (startPage || endPage) {
-      const pages = content.split(/\f|\n{5,}/);
-      const start = startPage ? startPage - 1 : 0;
-      const end = endPage ? endPage : pages.length;
-      contentToUse = pages.slice(start, end).join('\n\n');
-      console.log('Using pages', startPage || 1, 'to', endPage || pages.length, 'Content length:', contentToUse.length);
+      const CHARS_PER_PAGE = 3000;
+      const totalEstimatedPages = Math.ceil(content.length / CHARS_PER_PAGE);
+      const start = Math.max(0, ((startPage || 1) - 1) * CHARS_PER_PAGE);
+      const end = Math.min(content.length, (endPage || totalEstimatedPages) * CHARS_PER_PAGE);
+      contentToUse = content.substring(start, end);
+      console.log('Page range:', startPage || 1, 'to', endPage || totalEstimatedPages);
+      console.log('Char range:', start, 'to', end);
     }
 
-    // We no longer perform separate language detection.
-    // Instead, we tell the AI to ALWAYS keep the original document language
-    // and NEVER translate the content to another language.
-    console.log('Language detection skipped; using original document language.');
+    console.log('Using content length:', contentToUse.length);
 
     // Call Lovable AI to generate quiz
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
+
+    // Sample content if too long
+    const MAX_CONTENT = 40000;
+    let sampledContent = contentToUse;
+    if (contentToUse.length > MAX_CONTENT) {
+      const chunkSize = 3000;
+      const numChunks = Math.floor(MAX_CONTENT / chunkSize);
+      const step = Math.floor(contentToUse.length / numChunks);
+      const chunks: string[] = [];
+      
+      for (let i = 0; i < numChunks; i++) {
+        const start = i * step;
+        chunks.push(contentToUse.substring(start, start + chunkSize));
+      }
+      sampledContent = chunks.join('\n\n');
+      console.log('Sampled', numChunks, 'chunks from document');
+    }
+    
+    console.log('Final content length for AI:', sampledContent.length);
+    console.log('Content sample for AI:', sampledContent.substring(0, 300));
 
     const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
       method: 'POST',
@@ -83,39 +184,22 @@ serve(async (req) => {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'openai/gpt-5',
+        model: 'google/gemini-2.5-flash',
         messages: [
           {
             role: 'system',
-            content: `You are an expert educator that creates effective assessment quizzes.
+            content: `You are creating a 10-question multiple-choice quiz about educational content.
 
-Your job is to generate exactly 10 high-quality multiple-choice questions ONLY about the actual learning content of the document.
-
-STRICT CONTENT RULES:
-- Questions must be directly answerable from the document CONTENT itself.
-- DO NOT ask about: the file type, format, number of pages, language of the file, metadata, or "what this document is about" in general.
-- DO NOT create questions about instructions, headers like "Table of contents", or technical export info.
-- Focus on key concepts, definitions, theorems, formulas, dates, names, and important explanations.
-- Each question must be specific and concrete, never vague or meta.
-- Each question should have 4 options with exactly one correct answer.
-
-CRITICAL LANGUAGE RULE:
-- You MUST keep the exact same language(s) as in the provided content.
-- Do NOT translate anything.
-- If the text is in German, stay in German; if it's in English, stay in English; if it's mixed, preserve the mix.
-- NEVER switch to Italian or English unless the original text is in that language.
-- Copy technical terms exactly as written in the document.`
+RULES:
+1. Create questions ONLY about facts, concepts, definitions, and information IN the provided text
+2. Each question must have exactly 4 options with one correct answer
+3. Questions and answers must be in the SAME language as the source text
+4. Focus on: key concepts, definitions, important facts, dates, names, processes
+5. NEVER ask about: documents, files, formats, metadata, the quiz itself`
           },
           {
             role: 'user',
-            content: `Generate a quiz from this document titled "${document.title}".
-
-Requirements:
-- Do NOT translate; keep the original language of the text exactly as written.
-- Do NOT include any questions about file type, language, or metadata.
-- ONLY create questions about the subject-matter content that a student should learn.
-
-Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
+            content: `Here is the study material. Create 10 quiz questions about its educational content:\n\n${sampledContent}`
           }
         ],
         tools: [{
@@ -144,7 +228,8 @@ Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
                       explanation: { type: 'string', description: 'Explanation of the correct answer' }
                     },
                     required: ['question', 'options', 'correctIndex', 'explanation']
-                  }
+                  },
+                  minItems: 1
                 }
               },
               required: ['questions']
@@ -185,7 +270,7 @@ Here is the content (or selected pages):\n\n${contentToUse.substring(0, 50000)}`
     
     if (!Array.isArray(questions) || questions.length === 0) {
       console.error('No questions generated. Quiz data:', JSON.stringify(quizData));
-      throw new Error('AI failed to generate quiz questions. Please try again.');
+      throw new Error('AI failed to generate quiz questions. The document content may not be suitable for quiz generation.');
     }
     
     // Validate each question has required fields
