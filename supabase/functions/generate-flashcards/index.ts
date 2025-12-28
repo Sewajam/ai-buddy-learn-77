@@ -1,3 +1,6 @@
+// supabase/functions/generate-flashcards/index.ts
+// Updated: safer binary handling, optional OCR fallback, post-generation validation & retry.
+
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
@@ -7,11 +10,10 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Extract readable text from PDF binary data
+// Extract readable text from PDF binary data (simple heuristics kept)
 function extractTextFromPDF(binaryContent: string): string {
-  // Try to extract text between stream/endstream or BT/ET markers
   const textParts: string[] = [];
-  
+
   // Method 1: Extract text from PDF text objects (Tj, TJ operators)
   const tjMatches = binaryContent.match(/\(([^)]+)\)\s*Tj/g);
   if (tjMatches) {
@@ -22,14 +24,13 @@ function extractTextFromPDF(binaryContent: string): string {
       }
     }
   }
-  
+
   // Method 2: Extract readable ASCII sequences (longer runs of readable chars)
   const asciiMatches = binaryContent.match(/[\x20-\x7E]{20,}/g);
   if (asciiMatches) {
     for (const match of asciiMatches) {
-      // Filter out obvious binary/metadata patterns
-      if (!match.includes('stream') && 
-          !match.includes('endobj') && 
+      if (!match.includes('stream') &&
+          !match.includes('endobj') &&
           !match.includes('/Type') &&
           !match.includes('/Font') &&
           !match.includes('<<') &&
@@ -38,38 +39,71 @@ function extractTextFromPDF(binaryContent: string): string {
       }
     }
   }
-  
+
   return textParts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-// Check if content looks like binary/garbage
-function isBinaryContent(content: string): boolean {
-  // Check first 1000 chars for high ratio of non-printable chars
-  const sample = content.substring(0, 1000);
+// Check if content looks like binary/garbage using sampling and PDF magic bytes
+function isBinaryContentFromBuffer(buf: Uint8Array): boolean {
+  // PDF magic check
+  const pdfMagic = String.fromCharCode(...buf.slice(0, 5));
+  if (pdfMagic === '%PDF-') return true;
+
+  // Fallback heuristic: sample bytes for non-printables
+  const sampleLen = Math.min(buf.length, 1000);
   let nonPrintable = 0;
-  for (let i = 0; i < sample.length; i++) {
-    const code = sample.charCodeAt(i);
-    // Count non-printable chars (except common whitespace)
-    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
-      nonPrintable++;
-    }
-    if (code > 126) {
+  for (let i = 0; i < sampleLen; i++) {
+    const code = buf[i];
+    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code > 126) {
       nonPrintable++;
     }
   }
-  // If more than 10% non-printable, it's likely binary
-  return (nonPrintable / sample.length) > 0.1;
+  return (nonPrintable / Math.max(1, sampleLen)) > 0.1;
 }
 
-// Clean text content to remove any remaining binary artifacts
+// Clean text content to remove control chars and collapse whitespace
 function cleanTextContent(content: string): string {
-  // Remove null bytes and other control characters
   let cleaned = content.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ');
-  // Collapse multiple spaces
   cleaned = cleaned.replace(/\s+/g, ' ');
-  // Remove very short "words" that are likely artifacts
   cleaned = cleaned.replace(/\b[\w]{1,2}\b/g, ' ').replace(/\s+/g, ' ');
   return cleaned.trim();
+}
+
+// Optional: call external OCR service (if configured) — expects OCR_API_URL + OCR_API_KEY
+async function callExternalOCR(apiUrl: string, apiKey: string, fileBase64: string): Promise<string> {
+  try {
+    const resp = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({ file: fileBase64 }),
+    });
+    if (!resp.ok) {
+      console.error('OCR API error:', resp.status, await resp.text());
+      return '';
+    }
+    const j = await resp.json();
+    // Expect the OCR response to have a `text` field — adapt as needed to your OCR provider
+    return (j.text || j.data?.text || '').trim();
+  } catch (err) {
+    console.error('OCR call failed:', err);
+    return '';
+  }
+}
+
+// Basic support check: does `needle` appear in `haystack` (case-insensitive, normalized)
+function supportedBySource(needle: string, haystack: string): boolean {
+  if (!needle || !haystack) return false;
+  const n = needle.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+  if (n.length === 0) return false;
+  // require at least one token of length >= 4 to match as a substring (reduce false positives)
+  for (const token of n) {
+    if (token.length < 3) continue;
+    if (haystack.toLowerCase().includes(token)) return true;
+  }
+  return false;
 }
 
 serve(async (req) => {
@@ -101,7 +135,7 @@ serve(async (req) => {
     console.log('User authenticated:', !!user, 'Error:', userError?.message);
     if (userError || !user) throw new Error('User not authenticated');
 
-    // Get the document
+    // Get the document from DB
     const { data: document, error: docError } = await supabaseClient
       .from('documents')
       .select('*')
@@ -111,11 +145,12 @@ serve(async (req) => {
     if (docError) throw docError;
     if (!document) throw new Error('Document not found');
 
-    // Check if document has stored content first
+    // Use stored content if available and large enough
     let content = document.content || '';
-    
+    let usedOcr = false;
+
     if (!content || content.length < 100) {
-      // Download the file content
+      // Download the file content from storage
       const { data: fileData, error: fileError } = await supabaseClient
         .storage
         .from('documents')
@@ -123,32 +158,57 @@ serve(async (req) => {
 
       if (fileError) throw fileError;
 
-      const rawContent = await fileData.text();
-      console.log('Raw file content length:', rawContent.length);
-      
-      // Check if content is binary (like a PDF)
-      if (isBinaryContent(rawContent)) {
-        console.log('Detected binary content, attempting text extraction...');
-        content = extractTextFromPDF(rawContent);
-        console.log('Extracted text length:', content.length);
-        
-        if (content.length < 100) {
-          throw new Error('Could not extract readable text from this PDF. Please upload a text-based document (.txt, .md) or a PDF with selectable text.');
+      // Read as ArrayBuffer to preserve binary
+      const rawBuffer = new Uint8Array(await fileData.arrayBuffer());
+      console.log('Downloaded file bytes:', rawBuffer.length);
+
+      const looksBinary = isBinaryContentFromBuffer(rawBuffer);
+      console.log('looksBinary:', looksBinary);
+
+      if (looksBinary) {
+        console.log('Detected likely binary/PDF file, attempting text extraction from PDF bytes...');
+        // decode using latin1 to preserve byte values
+        const rawLatin1 = new TextDecoder('latin1').decode(rawBuffer);
+        content = extractTextFromPDF(rawLatin1);
+        console.log('Extracted text length from pdf heuristics:', content.length);
+
+        // If very short, try OCR fallback if configured
+        if (!content || content.length < 100) {
+          const OCR_API_URL = Deno.env.get('OCR_API_URL') ?? '';
+          const OCR_API_KEY = Deno.env.get('OCR_API_KEY') ?? '';
+          if (OCR_API_URL) {
+            console.log('Attempting OCR fallback via OCR_API_URL');
+            // convert to base64
+            const b64 = btoa(String.fromCharCode(...rawBuffer));
+            const ocrText = await callExternalOCR(OCR_API_URL, OCR_API_KEY, b64);
+            if (ocrText && ocrText.length > content.length) {
+              usedOcr = true;
+              content = ocrText;
+              console.log('OCR returned text length:', content.length);
+            } else {
+              console.log('OCR returned no usable text or failed');
+            }
+          } else {
+            // No OCR configured — return helpful error so user knows why it failed
+            throw new Error('Could not extract selectable text from this PDF (likely scanned). Enable OCR (OCR_API_URL + OCR_API_KEY) in function environment OR upload a text-based document (.txt, .md, or a PDF with selectable text).');
+          }
         }
       } else {
-        content = cleanTextContent(rawContent);
+        // Treat as plain-text file
+        const rawText = new TextDecoder('utf-8').decode(rawBuffer);
+        content = cleanTextContent(rawText);
+        console.log('Treated file as text, length:', content.length);
       }
     }
-    
-    console.log('Document content length:', content.length);
+
+    console.log('Final document content length:', content.length);
     console.log('Content preview:', content.substring(0, 500));
 
-    // Verify we have actual readable content
-    if (content.length < 100) {
+    if (!content || content.length < 100) {
       throw new Error('Document appears to be empty or unreadable. Please upload a text-based document.');
     }
 
-    // Extract page range if specified
+    // Apply page range if requested (approx by character slices)
     let contentToUse = content;
     if (startPage || endPage) {
       const CHARS_PER_PAGE = 3000;
@@ -160,153 +220,171 @@ serve(async (req) => {
       console.log('Char range:', start, 'to', end, 'Content length:', contentToUse.length);
     }
 
-    console.log('Using content, length:', contentToUse.length);
-
-    // Call Lovable AI to generate flashcards
-    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
-    if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
-
-    // Sample content for better coverage
+    // Sample content if very long (same strategy you had)
     const MAX_CONTENT_SIZE = 30000;
     let sampledContent = '';
-    
     if (contentToUse.length <= MAX_CONTENT_SIZE) {
       sampledContent = contentToUse;
     } else {
-      // Take evenly spaced chunks from the document
       const chunkSize = 2000;
-      const numChunks = Math.floor(MAX_CONTENT_SIZE / chunkSize);
+      const numChunks = Math.floor(MAX_CONTENT_SIZE / chunkSize) || 1;
       const step = Math.floor(contentToUse.length / numChunks);
       const chunks: string[] = [];
-      
       for (let i = 0; i < numChunks; i++) {
-        const start = i * step;
-        const chunk = contentToUse.substring(start, start + chunkSize);
-        chunks.push(chunk);
+        const s = i * step;
+        chunks.push(contentToUse.substring(s, s + chunkSize));
       }
-      
       sampledContent = chunks.join('\n\n');
       console.log('Sampled', numChunks, 'chunks from document');
     }
-    
+
     console.log('Sampled content length:', sampledContent.length);
     console.log('Sampled content preview:', sampledContent.substring(0, 300));
 
-    const difficultyInstruction = difficulty === 'mixed' 
+    const difficultyInstruction = difficulty === 'mixed'
       ? 'Create a balanced mix: some easy (basic facts), some medium (connections), some hard (analysis)'
       : `All ${difficulty} difficulty`;
 
-    const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages: [
-          {
-            role: 'system',
-            content: `You are creating ${count} study flashcards about the educational content provided.
+    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+    if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
+
+    // Function to call AI gateway (returns parsed flashcards or throws)
+    async function callGenerateFlashcards(promptContent: string) {
+      const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'google/gemini-2.5-flash',
+          messages: [
+            {
+              role: 'system',
+              content: `You are creating ${count} study flashcards about the educational content provided.
 
 RULES:
 1. Create questions ONLY about facts, concepts, definitions, and information IN the provided text
 2. Use direct recall questions: What is...? Define... Explain... Who... When... How...
 3. Questions and answers must be in the SAME language as the source text
 4. ${difficultyInstruction}
-5. NEVER ask about: documents, files, systems, formats, metadata, flashcards themselves`
-          },
-          {
-            role: 'user',
-            content: `Here is the study material. Create ${count} flashcards about its educational content:\n\n${sampledContent}`
-          }
-        ],
-        tools: [{
-          type: 'function',
-          function: {
-            name: 'create_flashcards',
-            description: 'Create study flashcards from the document',
-            parameters: {
-              type: 'object',
-              properties: {
-                flashcards: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      question: { type: 'string', description: 'The flashcard question' },
-                      answer: { type: 'string', description: 'The answer' },
-                      difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] }
-                    },
-                    required: ['question', 'answer', 'difficulty']
-                  },
-                  minItems: 1
-                }
-              },
-              required: ['flashcards']
+5. NEVER ask about: documents, files, systems, formats, metadata, flashcards themselves
+BE SURE: Use ONLY the information present inside the SOURCE text provided by the user. If an answer is not explicitly supported by the SOURCE, omit that card. Output should be a function call to create_flashcards as defined in the tools parameter.`
+            },
+            {
+              role: 'user',
+              content: `SOURCE:\n\n${promptContent}`
             }
-          }
-        }],
-        tool_choice: { type: 'function', function: { name: 'create_flashcards' } }
-      }),
-    });
+          ],
+          tools: [{
+            type: 'function',
+            function: {
+              name: 'create_flashcards',
+              description: 'Create study flashcards from the document',
+              parameters: {
+                type: 'object',
+                properties: {
+                  flashcards: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        question: { type: 'string', description: 'The flashcard question' },
+                        answer: { type: 'string', description: 'The answer' },
+                        difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] }
+                      },
+                      required: ['question', 'answer', 'difficulty']
+                    },
+                    minItems: 1
+                  }
+                },
+                required: ['flashcards']
+              }
+            }
+          }],
+          tool_choice: { type: 'function', function: { name: 'create_flashcards' } }
+        }),
+      });
 
-    if (!aiResponse.ok) {
-      const errorText = await aiResponse.text();
-      console.error('AI Gateway error:', aiResponse.status, errorText);
-      throw new Error(`AI Gateway error: ${aiResponse.status}`);
-    }
-
-    const aiData = await aiResponse.json();
-    console.log('AI response received');
-    console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
-    
-    const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) {
-      console.error('No tool call found in response');
-      throw new Error('No flashcards generated - AI did not return expected format');
-    }
-
-    console.log('Tool call arguments:', toolCall.function.arguments.substring(0, 1000));
-    
-    let flashcardsData;
-    try {
-      flashcardsData = JSON.parse(toolCall.function.arguments);
-    } catch (parseError) {
-      console.error('Failed to parse tool call arguments:', parseError);
-      throw new Error('Failed to parse flashcard data from AI');
-    }
-    
-    const flashcards = flashcardsData.flashcards || [];
-    
-    if (!Array.isArray(flashcards) || flashcards.length === 0) {
-      console.error('No flashcards generated. Data:', JSON.stringify(flashcardsData));
-      throw new Error('AI failed to generate flashcards. Please try again.');
-    }
-    
-    // Validate each flashcard has required fields
-    for (let i = 0; i < flashcards.length; i++) {
-      const card = flashcards[i];
-      if (!card.question || !card.answer) {
-        console.error(`Invalid flashcard at index ${i}:`, JSON.stringify(card));
-        throw new Error(`Invalid flashcard format at index ${i}`);
+      if (!aiResponse.ok) {
+        const errorText = await aiResponse.text();
+        console.error('AI Gateway error:', aiResponse.status, errorText);
+        throw new Error(`AI Gateway error: ${aiResponse.status}`);
       }
-      if (!card.difficulty) {
-        card.difficulty = 'medium';
+
+      const aiData = await aiResponse.json();
+      console.log('AI response received');
+      console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
+
+      const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
+      if (!toolCall) {
+        console.error('No tool call found in response');
+        throw new Error('No flashcards generated - AI did not return expected format');
       }
+
+      let flashcardsData;
+      try {
+        flashcardsData = JSON.parse(toolCall.function.arguments);
+      } catch (parseError) {
+        console.error('Failed to parse tool call arguments:', parseError);
+        throw new Error('Failed to parse flashcard data from AI');
+      }
+
+      const flashcards = flashcardsData.flashcards || [];
+      if (!Array.isArray(flashcards) || flashcards.length === 0) {
+        console.error('No flashcards generated. Data:', JSON.stringify(flashcardsData));
+        throw new Error('AI failed to generate flashcards. Please try again.');
+      }
+      return flashcards;
     }
-    
-    console.log(`Validated ${flashcards.length} flashcards`);
+
+    // First attempt
+    let flashcards = await callGenerateFlashcards(sampledContent);
+
+    // Validate support of flashcards against source content: count cards where answer or question tokens appear in contentToUse
+    function validateFlashcards(cards: any[], source: string) {
+      let supported = 0;
+      const validated: any[] = [];
+      for (const c of cards) {
+        const qOk = supportedBySource(c.question || '', source);
+        const aOk = supportedBySource(c.answer || '', source);
+        // Accept card if either question or answer has supporting tokens
+        if (qOk || aOk) supported++;
+        if (qOk || aOk) validated.push(c);
+        // Ensure difficulty exists
+        if (!c.difficulty) c.difficulty = 'medium';
+      }
+      const supportRate = cards.length ? (supported / cards.length) : 0;
+      return { validated, supportRate };
+    }
+
+    let { validated, supportRate } = validateFlashcards(flashcards, contentToUse);
+    console.log('Initial validation supportRate:', supportRate, 'validatedCount:', validated.length);
+
+    // If supportRate low, retry once with stricter instruction
+    if (supportRate < 0.6) {
+      console.log('Support rate low (<0.6), retrying generation with stricter instruction to only include cards fully supported by SOURCE...');
+      const stricterPrompt = `${sampledContent}\n\nIMPORTANT: Only create flashcards that are directly supported by the text above. If unsure, omit the card.`;
+      flashcards = await callGenerateFlashcards(stricterPrompt);
+      ({ validated, supportRate } = validateFlashcards(flashcards, contentToUse));
+      console.log('Post-retry validation supportRate:', supportRate, 'validatedCount:', validated.length);
+    }
+
+    // If still low, abort with helpful error rather than creating hallucinated cards
+    if (supportRate < 0.5 || validated.length === 0) {
+      console.error('Validation failed — insufficient supported flashcards. Support rate:', supportRate);
+      throw new Error('AI-generated flashcards were not sufficiently supported by the document text. This document may be unsuitable for automatic flashcard generation. Try a text-based document, enable OCR, or edit the document to include clearer content.');
+    }
 
     // Create flashcard set first
-    const setTitle = `${document.title} - ${difficulty === 'mixed' ? 'Mixed' : difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} (${flashcards.length} cards)`;
+    const setTitle = `${document.title} - ${difficulty === 'mixed' ? 'Mixed' : difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} (${validated.length} cards)`;
     const { data: flashcardSet, error: setError } = await supabaseClient
       .from('flashcard_sets')
       .insert({
         user_id: user.id,
         document_id: documentId,
         title: setTitle,
-        card_count: flashcards.length,
+        card_count: validated.length,
         difficulty: difficulty
       })
       .select()
@@ -315,14 +393,14 @@ RULES:
     if (setError) throw setError;
     console.log('Created flashcard set:', flashcardSet.id);
 
-    // Insert flashcards into database with set_id
-    const flashcardsToInsert = flashcards.map((card: any) => ({
+    // Insert only validated flashcards into database with set_id
+    const flashcardsToInsert = validated.map((card: any) => ({
       user_id: user.id,
       document_id: documentId,
       set_id: flashcardSet.id,
       question: card.question,
       answer: card.answer,
-      difficulty: card.difficulty,
+      difficulty: card.difficulty || 'medium',
     }));
 
     const { error: insertError } = await supabaseClient
@@ -331,13 +409,14 @@ RULES:
 
     if (insertError) throw insertError;
 
-    console.log(`Successfully created ${flashcards.length} flashcards`);
+    console.log(`Successfully created ${flashcardsToInsert.length} flashcards (validated)`);
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        count: flashcards.length,
-        flashcards: flashcardsToInsert
+      JSON.stringify({
+        success: true,
+        count: flashcardsToInsert.length,
+        flashcards: flashcardsToInsert,
+        usedOcr
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
