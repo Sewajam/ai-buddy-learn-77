@@ -7,6 +7,71 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+// Extract readable text from PDF binary data
+function extractTextFromPDF(binaryContent: string): string {
+  // Try to extract text between stream/endstream or BT/ET markers
+  const textParts: string[] = [];
+  
+  // Method 1: Extract text from PDF text objects (Tj, TJ operators)
+  const tjMatches = binaryContent.match(/\(([^)]+)\)\s*Tj/g);
+  if (tjMatches) {
+    for (const match of tjMatches) {
+      const text = match.replace(/\(([^)]+)\)\s*Tj/, '$1');
+      if (text && /^[\x20-\x7E\s]+$/.test(text)) {
+        textParts.push(text);
+      }
+    }
+  }
+  
+  // Method 2: Extract readable ASCII sequences (longer runs of readable chars)
+  const asciiMatches = binaryContent.match(/[\x20-\x7E]{20,}/g);
+  if (asciiMatches) {
+    for (const match of asciiMatches) {
+      // Filter out obvious binary/metadata patterns
+      if (!match.includes('stream') && 
+          !match.includes('endobj') && 
+          !match.includes('/Type') &&
+          !match.includes('/Font') &&
+          !match.includes('<<') &&
+          !match.includes('>>')) {
+        textParts.push(match);
+      }
+    }
+  }
+  
+  return textParts.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+// Check if content looks like binary/garbage
+function isBinaryContent(content: string): boolean {
+  // Check first 1000 chars for high ratio of non-printable chars
+  const sample = content.substring(0, 1000);
+  let nonPrintable = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const code = sample.charCodeAt(i);
+    // Count non-printable chars (except common whitespace)
+    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
+      nonPrintable++;
+    }
+    if (code > 126) {
+      nonPrintable++;
+    }
+  }
+  // If more than 10% non-printable, it's likely binary
+  return (nonPrintable / sample.length) > 0.1;
+}
+
+// Clean text content to remove any remaining binary artifacts
+function cleanTextContent(content: string): string {
+  // Remove null bytes and other control characters
+  let cleaned = content.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ');
+  // Collapse multiple spaces
+  cleaned = cleaned.replace(/\s+/g, ' ');
+  // Remove very short "words" that are likely artifacts
+  cleaned = cleaned.replace(/\b[\w]{1,2}\b/g, ' ').replace(/\s+/g, ' ');
+  return cleaned.trim();
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -46,21 +111,46 @@ serve(async (req) => {
     if (docError) throw docError;
     if (!document) throw new Error('Document not found');
 
-    // Download the file content
-    const { data: fileData, error: fileError } = await supabaseClient
-      .storage
-      .from('documents')
-      .download(document.file_path);
+    // Check if document has stored content first
+    let content = document.content || '';
+    
+    if (!content || content.length < 100) {
+      // Download the file content
+      const { data: fileData, error: fileError } = await supabaseClient
+        .storage
+        .from('documents')
+        .download(document.file_path);
 
-    if (fileError) throw fileError;
+      if (fileError) throw fileError;
 
-    const content = await fileData.text();
+      const rawContent = await fileData.text();
+      console.log('Raw file content length:', rawContent.length);
+      
+      // Check if content is binary (like a PDF)
+      if (isBinaryContent(rawContent)) {
+        console.log('Detected binary content, attempting text extraction...');
+        content = extractTextFromPDF(rawContent);
+        console.log('Extracted text length:', content.length);
+        
+        if (content.length < 100) {
+          throw new Error('Could not extract readable text from this PDF. Please upload a text-based document (.txt, .md) or a PDF with selectable text.');
+        }
+      } else {
+        content = cleanTextContent(rawContent);
+      }
+    }
+    
     console.log('Document content length:', content.length);
+    console.log('Content preview:', content.substring(0, 500));
+
+    // Verify we have actual readable content
+    if (content.length < 100) {
+      throw new Error('Document appears to be empty or unreadable. Please upload a text-based document.');
+    }
 
     // Extract page range if specified
     let contentToUse = content;
     if (startPage || endPage) {
-      // Estimate pages: ~3000 chars per page for PDFs/text documents
       const CHARS_PER_PAGE = 3000;
       const totalEstimatedPages = Math.ceil(content.length / CHARS_PER_PAGE);
       const start = Math.max(0, ((startPage || 1) - 1) * CHARS_PER_PAGE);
@@ -70,55 +160,37 @@ serve(async (req) => {
       console.log('Char range:', start, 'to', end, 'Content length:', contentToUse.length);
     }
 
-    // We no longer perform separate language detection.
-    // Instead, we tell the AI to ALWAYS keep the original document language
-    // and NEVER translate the content to another language.
-    console.log('Language detection skipped; using original document language.');
+    console.log('Using content, length:', contentToUse.length);
 
     // Call Lovable AI to generate flashcards
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
-    // Sample random chunks from throughout the document for better coverage
+    // Sample content for better coverage
     const MAX_CONTENT_SIZE = 30000;
     let sampledContent = '';
     
     if (contentToUse.length <= MAX_CONTENT_SIZE) {
-      // If document is small enough, use it all
       sampledContent = contentToUse;
     } else {
-      // Split content into logical sections (paragraphs or page-like chunks)
-      const sections = contentToUse.split(/\n{2,}|\f/).filter(s => s.trim().length > 100);
-      console.log('Total sections found:', sections.length);
+      // Take evenly spaced chunks from the document
+      const chunkSize = 2000;
+      const numChunks = Math.floor(MAX_CONTENT_SIZE / chunkSize);
+      const step = Math.floor(contentToUse.length / numChunks);
+      const chunks: string[] = [];
       
-      if (sections.length <= 10) {
-        // Few sections - just take first MAX_CONTENT_SIZE chars
-        sampledContent = contentToUse.substring(0, MAX_CONTENT_SIZE);
-      } else {
-        // Sample evenly from throughout the document (not just random)
-        // Divide document into equal parts and take sections from each part
-        const numSamples = Math.min(80, sections.length);
-        const step = sections.length / numSamples;
-        const selectedSections: string[] = [];
-        let totalSize = 0;
-        
-        for (let i = 0; i < numSamples && totalSize < MAX_CONTENT_SIZE; i++) {
-          const idx = Math.floor(i * step);
-          const section = sections[idx];
-          if (section && totalSize + section.length <= MAX_CONTENT_SIZE) {
-            selectedSections.push(section);
-            totalSize += section.length;
-          }
-        }
-        
-        // Join sections without any markers - just the raw content
-        sampledContent = selectedSections.join('\n\n');
-        
-        console.log('Sampled', selectedSections.length, 'sections from throughout document');
+      for (let i = 0; i < numChunks; i++) {
+        const start = i * step;
+        const chunk = contentToUse.substring(start, start + chunkSize);
+        chunks.push(chunk);
       }
+      
+      sampledContent = chunks.join('\n\n');
+      console.log('Sampled', numChunks, 'chunks from document');
     }
     
     console.log('Sampled content length:', sampledContent.length);
+    console.log('Sampled content preview:', sampledContent.substring(0, 300));
 
     const difficultyInstruction = difficulty === 'mixed' 
       ? 'Create a balanced mix: some easy (basic facts), some medium (connections), some hard (analysis)'
@@ -135,15 +207,18 @@ serve(async (req) => {
         messages: [
           {
             role: 'system',
-            content: `Create exactly ${count} flashcards. ${difficultyInstruction}.
+            content: `You are creating ${count} study flashcards about the educational content provided.
 
-CRITICAL: Only ask about the ACTUAL SUBJECT MATTER in the document. Never ask about documents, flashcards, systems, or meta-topics.
-
-Format: Direct Q&A only. Same language as the document.`
+RULES:
+1. Create questions ONLY about facts, concepts, definitions, and information IN the provided text
+2. Use direct recall questions: What is...? Define... Explain... Who... When... How...
+3. Questions and answers must be in the SAME language as the source text
+4. ${difficultyInstruction}
+5. NEVER ask about: documents, files, systems, formats, metadata, flashcards themselves`
           },
           {
             role: 'user',
-            content: `Create flashcards about this content:\n\n---\n${sampledContent}\n---`
+            content: `Here is the study material. Create ${count} flashcards about its educational content:\n\n${sampledContent}`
           }
         ],
         tools: [{
@@ -216,7 +291,6 @@ Format: Direct Q&A only. Same language as the document.`
         console.error(`Invalid flashcard at index ${i}:`, JSON.stringify(card));
         throw new Error(`Invalid flashcard format at index ${i}`);
       }
-      // Default difficulty if missing
       if (!card.difficulty) {
         card.difficulty = 'medium';
       }
