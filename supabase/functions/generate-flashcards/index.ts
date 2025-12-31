@@ -1,5 +1,5 @@
 // supabase/functions/generate-flashcards/index.ts
-// Updated: safer binary handling, optional OCR fallback, post-generation validation & retry.
+// Updated: language detection (heuristic), few-shot difficulty examples, deterministic model params.
 
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -85,7 +85,6 @@ async function callExternalOCR(apiUrl: string, apiKey: string, fileBase64: strin
       return '';
     }
     const j = await resp.json();
-    // Expect the OCR response to have a `text` field — adapt as needed to your OCR provider
     return (j.text || j.data?.text || '').trim();
   } catch (err) {
     console.error('OCR call failed:', err);
@@ -98,12 +97,50 @@ function supportedBySource(needle: string, haystack: string): boolean {
   if (!needle || !haystack) return false;
   const n = needle.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
   if (n.length === 0) return false;
-  // require at least one token of length >= 4 to match as a substring (reduce false positives)
   for (const token of n) {
     if (token.length < 3) continue;
     if (haystack.toLowerCase().includes(token)) return true;
   }
   return false;
+}
+
+// Lightweight language detection using stopword frequency for common languages
+function detectLanguageByStopwords(text: string): { code: string; name: string; confidence: number } {
+  const samples = {
+    en: ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that'],
+    es: ['de', 'la', 'que', 'el', 'en', 'y', 'los', 'se'],
+    fr: ['de', 'la', 'et', 'les', 'des', 'le', 'est', 'en'],
+    de: ['der', 'die', 'und', 'in', 'zu', 'den', 'das', 'ist'],
+    pt: ['de', 'que', 'e', 'o', 'a', 'do', 'da', 'em'],
+    it: ['di', 'e', 'il', 'la', 'che', 'in', 'a', 'per'],
+  };
+
+  const lower = text.toLowerCase();
+  const counts: Record<string, number> = {};
+  let totalMatches = 0;
+  for (const [code, words] of Object.entries(samples)) {
+    let c = 0;
+    for (const w of words) {
+      const regex = new RegExp(`\\b${w}\\b`, 'g');
+      const matches = lower.match(regex);
+      if (matches) c += matches.length;
+    }
+    counts[code] = c;
+    totalMatches += c;
+  }
+
+  let best = 'en';
+  let bestCount = 0;
+  for (const [k, v] of Object.entries(counts)) {
+    if (v > bestCount) {
+      best = k;
+      bestCount = v;
+    }
+  }
+
+  const confidence = totalMatches ? bestCount / totalMatches : 0;
+  const names: Record<string, string> = { en: 'English', es: 'Spanish', fr: 'French', de: 'German', pt: 'Portuguese', it: 'Italian' };
+  return { code: best, name: names[best] || best, confidence };
 }
 
 serve(async (req) => {
@@ -148,6 +185,7 @@ serve(async (req) => {
     // Use stored content if available and large enough
     let content = document.content || '';
     let usedOcr = false;
+    let detectedLanguage = { code: 'und', name: 'Unknown', confidence: 0 };
 
     if (!content || content.length < 100) {
       // Download the file content from storage
@@ -178,7 +216,6 @@ serve(async (req) => {
           const OCR_API_KEY = Deno.env.get('OCR_API_KEY') ?? '';
           if (OCR_API_URL) {
             console.log('Attempting OCR fallback via OCR_API_URL');
-            // convert to base64
             const b64 = btoa(String.fromCharCode(...rawBuffer));
             const ocrText = await callExternalOCR(OCR_API_URL, OCR_API_KEY, b64);
             if (ocrText && ocrText.length > content.length) {
@@ -189,7 +226,6 @@ serve(async (req) => {
               console.log('OCR returned no usable text or failed');
             }
           } else {
-            // No OCR configured — return helpful error so user knows why it failed
             throw new Error('Could not extract selectable text from this PDF (likely scanned). Enable OCR (OCR_API_URL + OCR_API_KEY) in function environment OR upload a text-based document (.txt, .md, or a PDF with selectable text).');
           }
         }
@@ -207,6 +243,10 @@ serve(async (req) => {
     if (!content || content.length < 100) {
       throw new Error('Document appears to be empty or unreadable. Please upload a text-based document.');
     }
+
+    // Language detection (heuristic) and force model to reply in that language
+    detectedLanguage = detectLanguageByStopwords(content);
+    console.log('Detected language:', detectedLanguage);
 
     // Apply page range if requested (approx by character slices)
     let contentToUse = content;
@@ -248,20 +288,37 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
+    // Few-shot examples to guide the model on difficulty and format
+    const fewShotExamples = `
+EXAMPLES (format: question | answer | difficulty):
+
+Easy example:
+Q: What is photosynthesis?
+A: Photosynthesis is the process by which green plants use sunlight to synthesize foods from carbon dioxide and water.
+Difficulty: easy
+
+Medium example:
+Q: How does the structure of a leaf support photosynthesis?
+A: The large surface area and thin structure of leaves allow more light absorption and efficient gas exchange, supporting photosynthesis.
+Difficulty: medium
+
+Hard example:
+Q: Explain how light intensity and CO2 concentration interact to limit photosynthetic rate and how a plant might physiologically respond.
+A: At low light, photosynthesis is light-limited; as light increases CO2 or enzyme (Rubisco) becomes limiting. Plants may allocate resources to more chlorophyll or adjust stomatal conductance to balance CO2 uptake with water loss.
+Difficulty: hard
+`;
+
     // Function to call AI gateway (returns parsed flashcards or throws)
-    async function callGenerateFlashcards(promptContent: string) {
-      const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
-          messages: [
-            {
-              role: 'system',
-              content: `You are creating ${count} study flashcards about the educational content provided.
+    async function callGenerateFlashcards(promptContent: string, instructionExtension = '') {
+      const body = {
+        model: 'google/gemini-2.5-flash',
+        temperature: 0.2,
+        top_p: 0.9,
+        max_tokens: 2000,
+        messages: [
+          {
+            role: 'system',
+            content: `You are creating ${count} study flashcards about the educational content provided.
 
 RULES:
 1. Create questions ONLY about facts, concepts, definitions, and information IN the provided text
@@ -269,41 +326,52 @@ RULES:
 3. Questions and answers must be in the SAME language as the source text
 4. ${difficultyInstruction}
 5. NEVER ask about: documents, files, systems, formats, metadata, flashcards themselves
-BE SURE: Use ONLY the information present inside the SOURCE text provided by the user. If an answer is not explicitly supported by the SOURCE, omit that card. Output should be a function call to create_flashcards as defined in the tools parameter.`
-            },
-            {
-              role: 'user',
-              content: `SOURCE:\n\n${promptContent}`
-            }
-          ],
-          tools: [{
-            type: 'function',
-            function: {
-              name: 'create_flashcards',
-              description: 'Create study flashcards from the document',
-              parameters: {
-                type: 'object',
-                properties: {
-                  flashcards: {
-                    type: 'array',
-                    items: {
-                      type: 'object',
-                      properties: {
-                        question: { type: 'string', description: 'The flashcard question' },
-                        answer: { type: 'string', description: 'The answer' },
-                        difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] }
-                      },
-                      required: ['question', 'answer', 'difficulty']
+BE SURE: Use ONLY the information present inside the SOURCE text provided by the user. If an answer is not explicitly supported by the SOURCE, omit that card. Output should be a function call to create_flashcards as defined in the tools parameter.
+REPLY IN: ${detectedLanguage.name}
+${instructionExtension}
+`
+          },
+          {
+            role: 'user',
+            content: `SOURCE:\n\n${promptContent}\n\n${fewShotExamples}`
+          }
+        ],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'create_flashcards',
+            description: 'Create study flashcards from the document',
+            parameters: {
+              type: 'object',
+              properties: {
+                flashcards: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      question: { type: 'string', description: 'The flashcard question' },
+                      answer: { type: 'string', description: 'The answer' },
+                      difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] }
                     },
-                    minItems: 1
-                  }
-                },
-                required: ['flashcards']
-              }
+                    required: ['question', 'answer', 'difficulty']
+                  },
+                  minItems: 1
+                }
+              },
+              required: ['flashcards']
             }
-          }],
-          tool_choice: { type: 'function', function: { name: 'create_flashcards' } }
-        }),
+          }
+        }],
+        tool_choice: { type: 'function', function: { name: 'create_flashcards' } }
+      };
+
+      const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
       });
 
       if (!aiResponse.ok) {
@@ -348,10 +416,8 @@ BE SURE: Use ONLY the information present inside the SOURCE text provided by the
       for (const c of cards) {
         const qOk = supportedBySource(c.question || '', source);
         const aOk = supportedBySource(c.answer || '', source);
-        // Accept card if either question or answer has supporting tokens
         if (qOk || aOk) supported++;
         if (qOk || aOk) validated.push(c);
-        // Ensure difficulty exists
         if (!c.difficulty) c.difficulty = 'medium';
       }
       const supportRate = cards.length ? (supported / cards.length) : 0;
@@ -364,8 +430,8 @@ BE SURE: Use ONLY the information present inside the SOURCE text provided by the
     // If supportRate low, retry once with stricter instruction
     if (supportRate < 0.6) {
       console.log('Support rate low (<0.6), retrying generation with stricter instruction to only include cards fully supported by SOURCE...');
-      const stricterPrompt = `${sampledContent}\n\nIMPORTANT: Only create flashcards that are directly supported by the text above. If unsure, omit the card.`;
-      flashcards = await callGenerateFlashcards(stricterPrompt);
+      const stricterInstruction = 'IMPORTANT: Only create flashcards that are directly supported by the text above. If unsure, omit the card.';
+      flashcards = await callGenerateFlashcards(sampledContent, `\n${stricterInstruction}`);
       ({ validated, supportRate } = validateFlashcards(flashcards, contentToUse));
       console.log('Post-retry validation supportRate:', supportRate, 'validatedCount:', validated.length);
     }
@@ -416,7 +482,8 @@ BE SURE: Use ONLY the information present inside the SOURCE text provided by the
         success: true,
         count: flashcardsToInsert.length,
         flashcards: flashcardsToInsert,
-        usedOcr
+        usedOcr,
+        language: detectedLanguage
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
