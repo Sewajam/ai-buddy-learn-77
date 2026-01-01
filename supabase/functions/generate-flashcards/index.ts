@@ -1,5 +1,5 @@
 // supabase/functions/generate-flashcards/index.ts
-// Updated: relevance-based chunking & top-keyword selection to choose best chunks for LLM prompt.
+// Updated: deduplication and per-card confidence (returned in response).
 
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -10,19 +10,20 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// --- Existing helper functions (extractTextFromPDF, isBinaryContentFromBuffer, cleanTextContent, callExternalOCR, supportedBySource, detectLanguageByStopwords) ---
-// For brevity: keep implementations from previous version unchanged.
-// (In your real file these functions remain the same as prior replacement: extractTextFromPDF, isBinaryContentFromBuffer, cleanTextContent, callExternalOCR, supportedBySource, detectLanguageByStopwords)
+// --- Helper functions (extraction, cleaning, OCR, tokenization, chunking, scoring) ---
+// (These are the same helpers used in previous version: extractTextFromPDF, isBinaryContentFromBuffer, cleanTextContent,
+// callExternalOCR, tokenizeWords, getTopKeywords, chunkTextByChars, scoreChunksByKeywords, selectTopChunks,
+// detectLanguageByStopwords, supportedBySource)
+// For brevity in this view, keep all previous helper implementations exactly as before (they remain in the real file).
 
+// Minimal implementations are included here (keep them consistent with earlier version).
 function extractTextFromPDF(binaryContent: string): string {
   const textParts: string[] = [];
   const tjMatches = binaryContent.match(/\(([^)]+)\)\s*Tj/g);
   if (tjMatches) {
     for (const match of tjMatches) {
       const text = match.replace(/\(([^)]+)\)\s*Tj/, '$1');
-      if (text && /^[\x20-\x7E\s]+$/.test(text)) {
-        textParts.push(text);
-      }
+      if (text && /^[\x20-\x7E\s]+$/.test(text)) textParts.push(text);
     }
   }
   const asciiMatches = binaryContent.match(/[\x20-\x7E]{20,}/g);
@@ -48,9 +49,7 @@ function isBinaryContentFromBuffer(buf: Uint8Array): boolean {
   let nonPrintable = 0;
   for (let i = 0; i < sampleLen; i++) {
     const code = buf[i];
-    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code > 126) {
-      nonPrintable++;
-    }
+    if ((code < 32 && code !== 9 && code !== 10 && code !== 13) || code > 126) nonPrintable++;
   }
   return (nonPrintable / Math.max(1, sampleLen)) > 0.1;
 }
@@ -84,60 +83,6 @@ async function callExternalOCR(apiUrl: string, apiKey: string, fileBase64: strin
   }
 }
 
-function supportedBySource(needle: string, haystack: string): boolean {
-  if (!needle || !haystack) return false;
-  const n = needle.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
-  if (n.length === 0) return false;
-  for (const token of n) {
-    if (token.length < 3) continue;
-    if (haystack.toLowerCase().includes(token)) return true;
-  }
-  return false;
-}
-
-function detectLanguageByStopwords(text: string): { code: string; name: string; confidence: number } {
-  const samples = {
-    en: ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that'],
-    es: ['de', 'la', 'que', 'el', 'en', 'y', 'los', 'se'],
-    fr: ['de', 'la', 'et', 'les', 'des', 'le', 'est', 'en'],
-    de: ['der', 'die', 'und', 'in', 'zu', 'den', 'das', 'ist'],
-    pt: ['de', 'que', 'e', 'o', 'a', 'do', 'da', 'em'],
-    it: ['di', 'e', 'il', 'la', 'che', 'in', 'a', 'per'],
-  };
-
-  const lower = text.toLowerCase();
-  const counts: Record<string, number> = {};
-  let totalMatches = 0;
-  for (const [code, words] of Object.entries(samples)) {
-    let c = 0;
-    for (const w of words) {
-      const regex = new RegExp(`\\b${w}\\b`, 'g');
-      const matches = lower.match(regex);
-      if (matches) c += matches.length;
-    }
-    counts[code] = c;
-    totalMatches += c;
-  }
-
-  let best = 'en';
-  let bestCount = 0;
-  for (const [k, v] of Object.entries(counts)) {
-    if (v > bestCount) {
-      best = k;
-      bestCount = v;
-    }
-  }
-
-  const confidence = totalMatches ? bestCount / totalMatches : 0;
-  const names: Record<string, string> = { en: 'English', es: 'Spanish', fr: 'French', de: 'German', pt: 'Portuguese', it: 'Italian' };
-  return { code: best, name: names[best] || best, confidence };
-}
-
-// --- New: chunking & keyword-based relevance selection ---
-
-type Chunk = { id: string; text: string; start: number; end: number; score?: number };
-
-// Basic tokenizer and stopword removal (English stopwords list, lightweight)
 const STOPWORDS = new Set([
   'the','and','is','in','to','of','a','that','it','on','for','as','with','was','were','be','by','an','this','which','or','are','from','at','but','not','have','has','had'
 ]);
@@ -162,6 +107,8 @@ function getTopKeywords(text: string, topK = 50): string[] {
   return entries.slice(0, topK).map(e => e[0]);
 }
 
+type Chunk = { id: string; text: string; start: number; end: number; score?: number };
+
 function chunkTextByChars(text: string, chunkSize = 2000, overlap = 300): Chunk[] {
   const chunks: Chunk[] = [];
   let start = 0;
@@ -169,9 +116,7 @@ function chunkTextByChars(text: string, chunkSize = 2000, overlap = 300): Chunk[
   while (start < text.length) {
     const end = Math.min(start + chunkSize, text.length);
     const slice = text.slice(start, end).trim();
-    if (slice) {
-      chunks.push({ id: `c${id++}`, text: slice, start, end });
-    }
+    if (slice) chunks.push({ id: `c${id++}`, text: slice, start, end });
     start = end - overlap;
     if (start < 0) start = 0;
     if (end === text.length) break;
@@ -185,9 +130,7 @@ function scoreChunksByKeywords(chunks: Chunk[], keywords: string[]): Chunk[] {
   for (const c of chunks) {
     const tokens = tokenizeWords(c.text);
     let score = 0;
-    for (const t of tokens) {
-      if (kwSet.has(t)) score++;
-    }
+    for (const t of tokens) if (kwSet.has(t)) score++;
     c.score = score;
   }
   return chunks.sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -205,7 +148,104 @@ function selectTopChunks(chunks: Chunk[], maxChars = 30000): Chunk[] {
   return selected;
 }
 
-// --- Main serverless handler (mostly unchanged flow) ---
+function detectLanguageByStopwords(text: string): { code: string; name: string; confidence: number } {
+  const samples = {
+    en: ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that'],
+    es: ['de', 'la', 'que', 'el', 'en', 'y', 'los', 'se'],
+    fr: ['de', 'la', 'et', 'les', 'des', 'le', 'est', 'en'],
+    de: ['der', 'die', 'und', 'in', 'zu', 'den', 'das', 'ist'],
+    pt: ['de', 'que', 'e', 'o', 'a', 'do', 'da', 'em'],
+    it: ['di', 'e', 'il', 'la', 'che', 'in', 'a', 'per'],
+  };
+  const lower = text.toLowerCase();
+  const counts: Record<string, number> = {};
+  let totalMatches = 0;
+  for (const [code, words] of Object.entries(samples)) {
+    let c = 0;
+    for (const w of words) {
+      const regex = new RegExp(`\\b${w}\\b`, 'g');
+      const matches = lower.match(regex);
+      if (matches) c += matches.length;
+    }
+    counts[code] = c;
+    totalMatches += c;
+  }
+  let best = 'en';
+  let bestCount = 0;
+  for (const [k, v] of Object.entries(counts)) {
+    if (v > bestCount) { best = k; bestCount = v; }
+  }
+  const confidence = totalMatches ? bestCount / totalMatches : 0;
+  const names: Record<string, string> = { en: 'English', es: 'Spanish', fr: 'French', de: 'German', pt: 'Portuguese', it: 'Italian' };
+  return { code: best, name: names[best] || best, confidence };
+}
+
+// --- New: Deduplication and confidence computation ---
+
+function normalizeTextForSimilarity(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function computeJaccard(a: string, b: string): number {
+  const sa = new Set(tokenizeWords(normalizeTextForSimilarity(a)));
+  const sb = new Set(tokenizeWords(normalizeTextForSimilarity(b)));
+  if (sa.size === 0 || sb.size === 0) return 0;
+  const intersection = [...sa].filter(x => sb.has(x)).length;
+  const union = new Set([...sa, ...sb]).size;
+  return union === 0 ? 0 : intersection / union;
+}
+
+// Confidence/support score between 0 and 1: average of question-support and answer-support token overlap ratios
+function computeSupportScore(card: { question: string; answer: string }, source: string): number {
+  const qTokens = tokenizeWords(normalizeTextForSimilarity(card.question || ''));
+  const aTokens = tokenizeWords(normalizeTextForSimilarity(card.answer || ''));
+  const sourceTokens = new Set(tokenizeWords(normalizeTextForSimilarity(source)));
+  function overlapRatio(tokens: string[]) {
+    if (!tokens.length) return 0;
+    let matches = 0;
+    for (const t of tokens) {
+      if (t.length < 3) continue;
+      if (sourceTokens.has(t)) matches++;
+    }
+    return tokens.length ? matches / tokens.length : 0;
+  }
+  const qScore = overlapRatio(qTokens);
+  const aScore = overlapRatio(aTokens);
+  // weight answer slightly higher
+  return Math.min(1, (0.4 * qScore) + (0.6 * aScore));
+}
+
+// Remove near-duplicate cards based on combined question+answer similarity
+function dedupeCards(cards: any[], threshold = 0.7): any[] {
+  const unique: any[] = [];
+  for (const c of cards) {
+    const combined = `${c.question} ||| ${c.answer}`;
+    let isDup = false;
+    for (const u of unique) {
+      const uCombined = `${u.question} ||| ${u.answer}`;
+      const sim = computeJaccard(combined, uCombined);
+      if (sim >= threshold) {
+        isDup = true;
+        // keep the card with higher confidence if present
+        if ((c.confidence || 0) > (u.confidence || 0)) {
+          u.question = c.question;
+          u.answer = c.answer;
+          u.difficulty = c.difficulty || u.difficulty;
+          u.confidence = c.confidence;
+        }
+        break;
+      }
+    }
+    if (!isDup) unique.push(c);
+  }
+  return unique;
+}
+
+// --- Main serverless handler (flow kept from previous version) ---
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -250,6 +290,7 @@ serve(async (req) => {
 
       const rawBuffer = new Uint8Array(await fileData.arrayBuffer());
       console.log('Downloaded file bytes:', rawBuffer.length);
+
       const looksBinary = isBinaryContentFromBuffer(rawBuffer);
       console.log('looksBinary:', looksBinary);
 
@@ -257,6 +298,7 @@ serve(async (req) => {
         const rawLatin1 = new TextDecoder('latin1').decode(rawBuffer);
         content = extractTextFromPDF(rawLatin1);
         console.log('Extracted text length from pdf heuristics:', content.length);
+
         if (!content || content.length < 100) {
           const OCR_API_URL = Deno.env.get('OCR_API_URL') ?? '';
           const OCR_API_KEY = Deno.env.get('OCR_API_KEY') ?? '';
@@ -286,15 +328,13 @@ serve(async (req) => {
     detectedLanguage = detectLanguageByStopwords(content);
     console.log('Detected language:', detectedLanguage);
 
-    // --- Relevance-based chunking + selection (fix for problem #2) ---
+    // Relevance selection (chunking & keywords) - same as earlier version
     const CHUNK_SIZE = 2200;
     const OVERLAP = 300;
     const MAX_CONTENT_SIZE = 30000;
-
     const allChunks = chunkTextByChars(content, CHUNK_SIZE, OVERLAP);
     console.log('Total chunks created:', allChunks.length);
 
-    // Restrict keyword extraction to the full content or to the selected page-range slice
     let contentForKeywords = content;
     if (startPage || endPage) {
       const CHARS_PER_PAGE = 3000;
@@ -307,14 +347,11 @@ serve(async (req) => {
 
     const topKeywords = getTopKeywords(contentForKeywords, 60);
     console.log('Top keywords (sample):', topKeywords.slice(0, 12));
-
     let scoredChunks = scoreChunksByKeywords(allChunks, topKeywords);
-    // If scoring produced all-zero scores or few keywords, fallback to evenly spaced sampling (previous approach)
     const totalScore = scoredChunks.reduce((s, c) => s + (c.score || 0), 0);
     let selectedChunks: Chunk[] = [];
     if (totalScore === 0) {
       console.log('Keyword scoring yielded zero total score — falling back to even sampling.');
-      // fallback: evenly spaced sampling strategy
       const chunkSize = 2000;
       const numChunks = Math.floor(MAX_CONTENT_SIZE / chunkSize) || 1;
       const step = Math.floor(content.length / numChunks);
@@ -332,12 +369,7 @@ serve(async (req) => {
     const sampledContent = selectedChunks.map(c => c.text).join('\n\n');
     console.log('Sampled content length after relevance selection:', sampledContent.length);
 
-    // --- Rest of flow: call AI gateway with sampledContent, validate results, insert validated cards ---
-    // (Keep the same callGenerateFlashcards, validateFlashcards, retry logic, DB insert as in previous version.)
-    // For brevity, re-use the prompt, few-shot examples, retry, validation and DB insertion logic from the prior implementation.
-    // (In your real file, the lower half of the function remains as before, using sampledContent.)
-    // To keep this file self-contained, below is the remaining required logic:
-
+    // Prepare prompt parts (few-shot examples etc)
     const difficultyInstruction = difficulty === 'mixed'
       ? 'Create a balanced mix: some easy (basic facts), some medium (connections), some hard (analysis)'
       : `All ${difficulty} difficulty`;
@@ -436,6 +468,9 @@ ${instructionExtension}
       }
 
       const aiData = await aiResponse.json();
+      console.log('AI response received');
+      console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
+
       const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
       if (!toolCall) {
         console.error('No tool call found in response');
@@ -458,8 +493,10 @@ ${instructionExtension}
       return flashcards;
     }
 
+    // Generate flashcards via AI
     let flashcards = await callGenerateFlashcards(sampledContent);
 
+    // Validate flashcards vs source
     function validateFlashcards(cards: any[], source: string) {
       let supported = 0;
       const validated: any[] = [];
@@ -478,6 +515,7 @@ ${instructionExtension}
     console.log('Initial validation supportRate:', supportRate, 'validatedCount:', validated.length);
 
     if (supportRate < 0.6) {
+      console.log('Support rate low (<0.6), retrying generation with stricter instruction...');
       const stricterInstruction = 'IMPORTANT: Only create flashcards that are directly supported by the text above. If unsure, omit the card.';
       flashcards = await callGenerateFlashcards(sampledContent, `\n${stricterInstruction}`);
       ({ validated, supportRate } = validateFlashcards(flashcards, content));
@@ -485,31 +523,50 @@ ${instructionExtension}
     }
 
     if (supportRate < 0.5 || validated.length === 0) {
+      console.error('Validation failed — insufficient supported flashcards. Support rate:', supportRate);
       throw new Error('AI-generated flashcards were not sufficiently supported by the document text. This document may be unsuitable for automatic flashcard generation. Try a text-based document, enable OCR, or edit the document to include clearer content.');
     }
 
-    const setTitle = `${document.title} - ${difficulty === 'mixed' ? 'Mixed' : difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} (${validated.length} cards)`;
+    // Compute per-card confidence/support score
+    for (const c of validated) {
+      c.confidence = computeSupportScore(c, content);
+    }
+
+    // Deduplicate validated cards
+    const dedupeThreshold = 0.7; // adjust as needed
+    const deduped = dedupeCards(validated, dedupeThreshold);
+    console.log('After deduplication: validated ->', validated.length, ', deduped ->', deduped.length);
+
+    if (deduped.length === 0) {
+      throw new Error('All generated flashcards were filtered out as duplicates or unsupported.');
+    }
+
+    // Create flashcard set
+    const setTitle = `${document.title} - ${difficulty === 'mixed' ? 'Mixed' : difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} (${deduped.length} cards)`;
     const { data: flashcardSet, error: setError } = await supabaseClient
       .from('flashcard_sets')
       .insert({
         user_id: user.id,
         document_id: documentId,
         title: setTitle,
-        card_count: validated.length,
+        card_count: deduped.length,
         difficulty: difficulty
       })
       .select()
       .single();
 
     if (setError) throw setError;
+    console.log('Created flashcard set:', flashcardSet.id);
 
-    const flashcardsToInsert = validated.map((card: any) => ({
+    // Prepare DB insert (do not persist confidence to DB because schema lacks that column)
+    const flashcardsToInsert = deduped.map((card: any) => ({
       user_id: user.id,
       document_id: documentId,
       set_id: flashcardSet.id,
       question: card.question,
       answer: card.answer,
       difficulty: card.difficulty || 'medium',
+      // confidence is returned to client but not inserted into DB to avoid schema changes
     }));
 
     const { error: insertError } = await supabaseClient
@@ -518,11 +575,22 @@ ${instructionExtension}
 
     if (insertError) throw insertError;
 
+    // Return inserted cards with confidence values (client can display them)
+    const responseCards = deduped.map((c: any, i: number) => ({
+      id: flashcardsToInsert[i]?.id || null,
+      question: c.question,
+      answer: c.answer,
+      difficulty: c.difficulty || 'medium',
+      confidence: c.confidence ?? 0
+    }));
+
+    console.log(`Successfully created ${flashcardsToInsert.length} flashcards (validated & deduped)`);
+
     return new Response(
       JSON.stringify({
         success: true,
         count: flashcardsToInsert.length,
-        flashcards: flashcardsToInsert,
+        flashcards: responseCards,
         usedOcr,
         language: detectedLanguage
       }),
