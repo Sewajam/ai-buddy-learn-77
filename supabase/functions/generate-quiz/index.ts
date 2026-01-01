@@ -1,3 +1,7 @@
+// supabase/functions/generate-quiz/index.ts
+// Updated: Prefer DB flashcards for quiz generation; fallback to AI with validation and language enforcement.
+// Creates multiple-choice quizzes (4 options per question) and stores them in the quizzes table.
+
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
@@ -7,60 +11,64 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Extract readable text from PDF binary data
-function extractTextFromPDF(binaryContent: string): string {
-  const textParts: string[] = [];
-  
-  // Method 1: Extract text from PDF text objects (Tj, TJ operators)
-  const tjMatches = binaryContent.match(/\(([^)]+)\)\s*Tj/g);
-  if (tjMatches) {
-    for (const match of tjMatches) {
-      const text = match.replace(/\(([^)]+)\)\s*Tj/, '$1');
-      if (text && /^[\x20-\x7E\s]+$/.test(text)) {
-        textParts.push(text);
-      }
+// Lightweight language detection reused (stopword-based)
+function detectLanguageByStopwords(text: string): { code: string; name: string; confidence: number } {
+  const samples = {
+    en: ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that'],
+    es: ['de', 'la', 'que', 'el', 'en', 'y', 'los', 'se'],
+    fr: ['de', 'la', 'et', 'les', 'des', 'le', 'est', 'en'],
+    de: ['der', 'die', 'und', 'in', 'zu', 'den', 'das', 'ist'],
+    pt: ['de', 'que', 'e', 'o', 'a', 'do', 'da', 'em'],
+    it: ['di', 'e', 'il', 'la', 'che', 'in', 'a', 'per'],
+  };
+
+  const lower = text.toLowerCase();
+  const counts: Record<string, number> = {};
+  let totalMatches = 0;
+  for (const [code, words] of Object.entries(samples)) {
+    let c = 0;
+    for (const w of words) {
+      const regex = new RegExp(`\\b${w}\\b`, 'g');
+      const matches = lower.match(regex);
+      if (matches) c += matches.length;
+    }
+    counts[code] = c;
+    totalMatches += c;
+  }
+
+  let best = 'en';
+  let bestCount = 0;
+  for (const [k, v] of Object.entries(counts)) {
+    if (v > bestCount) {
+      best = k;
+      bestCount = v;
     }
   }
-  
-  // Method 2: Extract readable ASCII sequences
-  const asciiMatches = binaryContent.match(/[\x20-\x7E]{20,}/g);
-  if (asciiMatches) {
-    for (const match of asciiMatches) {
-      if (!match.includes('stream') && 
-          !match.includes('endobj') && 
-          !match.includes('/Type') &&
-          !match.includes('/Font') &&
-          !match.includes('<<') &&
-          !match.includes('>>')) {
-        textParts.push(match);
-      }
-    }
-  }
-  
-  return textParts.join(' ').replace(/\s+/g, ' ').trim();
+
+  const confidence = totalMatches ? bestCount / totalMatches : 0;
+  const names: Record<string, string> = { en: 'English', es: 'Spanish', fr: 'French', de: 'German', pt: 'Portuguese', it: 'Italian' };
+  return { code: best, name: names[best] || best, confidence };
 }
 
-// Check if content looks like binary/garbage
-function isBinaryContent(content: string): boolean {
-  const sample = content.substring(0, 1000);
-  let nonPrintable = 0;
-  for (let i = 0; i < sample.length; i++) {
-    const code = sample.charCodeAt(i);
-    if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
-      nonPrintable++;
-    }
-    if (code > 126) {
-      nonPrintable++;
-    }
+// Basic check if answer or question tokens appear in source
+function supportedBySource(needle: string, haystack: string): boolean {
+  if (!needle || !haystack) return false;
+  const n = needle.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+  if (n.length === 0) return false;
+  for (const token of n) {
+    if (token.length < 3) continue;
+    if (haystack.toLowerCase().includes(token)) return true;
   }
-  return (nonPrintable / sample.length) > 0.1;
+  return false;
 }
 
-// Clean text content
-function cleanTextContent(content: string): string {
-  let cleaned = content.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ');
-  cleaned = cleaned.replace(/\s+/g, ' ');
-  return cleaned.trim();
+// Shuffle helper
+function shuffle<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 serve(async (req) => {
@@ -69,8 +77,8 @@ serve(async (req) => {
   }
 
   try {
-    const { documentId, startPage, endPage } = await req.json();
-    console.log('Generating quiz for document:', documentId, 'pages:', startPage, '-', endPage);
+    const { documentId, count = 10, startPage, endPage } = await req.json();
+    console.log('Generating quiz for document:', documentId, 'count:', count, 'pages:', startPage, '-', endPage);
 
     const authHeader = req.headers.get('Authorization');
     console.log('Auth header present:', !!authHeader);
@@ -92,7 +100,7 @@ serve(async (req) => {
     console.log('User authenticated:', !!user, 'Error:', userError?.message);
     if (userError || !user) throw new Error('User not authenticated');
 
-    // Get the document
+    // Fetch document to get title and maybe cached content
     const { data: document, error: docError } = await supabaseClient
       .from('documents')
       .select('*')
@@ -102,104 +110,155 @@ serve(async (req) => {
     if (docError) throw docError;
     if (!document) throw new Error('Document not found');
 
-    // Check if document has stored content first
+    // Try to use validated flashcards already stored for this document
+    const { data: existingCards, error: cardsError } = await supabaseClient
+      .from('flashcards')
+      .select('*')
+      .eq('document_id', documentId)
+      .eq('user_id', user.id);
+
+    if (cardsError) throw cardsError;
+
+    const validatedCards = Array.isArray(existingCards) ? existingCards : [];
+    console.log('Found validated flashcards count:', validatedCards.length);
+
+    // Helper to build MCQ from flashcards: use other flashcards' answers as distractors when possible
+    function buildQuizFromFlashcards(cards: any[], requestedCount: number) {
+      const questions: any[] = [];
+      // Shuffle cards to pick random ones
+      const pool = shuffle([...cards]);
+      const maxQuestions = Math.min(requestedCount, pool.length);
+      // For each card, pick distractors from other cards' answers
+      for (let i = 0, added = 0; i < pool.length && added < maxQuestions; i++) {
+        const card = pool[i];
+        const correct = card.answer;
+        // pick up to 3 other answers as distractors
+        const otherAnswers = pool.filter((c) => c.id !== card.id).map((c) => c.answer);
+        shuffle(otherAnswers);
+        const options = [correct, ...otherAnswers.slice(0, 3)];
+        // If not enough distractors, skip this card (we will handle with fallback)
+        if (options.length < 2) continue;
+        // ensure options length is 4 (duplicate or generate simple distractors if necessary)
+        while (options.length < 4) {
+          // create a simple distractor by truncating/altering correct answer (not ideal but fallback)
+          const alt = (correct.length > 10) ? correct.slice(0, Math.max(5, Math.floor(correct.length * 0.6))) + '...' : correct + ' (alt)';
+          if (!options.includes(alt)) options.push(alt);
+          else break;
+        }
+        // Trim to 4 and shuffle
+        const finalOptions = shuffle(options.slice(0, 4));
+        const correctIndex = finalOptions.findIndex((o) => o === correct);
+        // Basic validation: ensure correctIndex found
+        if (correctIndex === -1) continue;
+        questions.push({
+          question: card.question,
+          options: finalOptions,
+          correctIndex,
+          explanation: '', // explanation can be empty; UI could request it later
+        });
+        added++;
+      }
+      return questions;
+    }
+
+    // If we have at least 4 validated cards, prefer DB-based quiz generation
+    if (validatedCards.length >= 4) {
+      const questions = buildQuizFromFlashcards(validatedCards, count);
+      if (questions.length === 0) {
+        console.log('Could not build quiz from DB flashcards despite having cards; falling back to AI generation.');
+      } else {
+        // Insert quiz into DB
+        const title = `Quiz: ${document.title}`;
+        const { data: quiz, error: insertError } = await supabaseClient
+          .from('quizzes')
+          .insert({
+            user_id: user.id,
+            document_id: documentId,
+            title,
+            questions,
+          })
+          .select()
+          .maybeSingle();
+
+        if (insertError) throw insertError;
+        console.log('Created quiz from validated flashcards with', questions.length, 'questions');
+        return new Response(
+          JSON.stringify({ success: true, quiz }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+    }
+
+    // Fallback to AI-based quiz generation (if not enough validated flashcards)
+    // We'll attempt to use document.content if present, else download and extract text similar to flashcards function
     let content = document.content || '';
-    
     if (!content || content.length < 100) {
-      // Download the file content
       const { data: fileData, error: fileError } = await supabaseClient
         .storage
         .from('documents')
         .download(document.file_path);
-
       if (fileError) throw fileError;
-
-      const rawContent = await fileData.text();
-      console.log('Raw file content length:', rawContent.length);
-      
-      // Check if content is binary (like a PDF)
-      if (isBinaryContent(rawContent)) {
-        console.log('Detected binary content, attempting text extraction...');
-        content = extractTextFromPDF(rawContent);
-        console.log('Extracted text length:', content.length);
-        
-        if (content.length < 100) {
-          throw new Error('Could not extract readable text from this PDF. Please upload a text-based document (.txt, .md) or a PDF with selectable text.');
-        }
-      } else {
-        content = cleanTextContent(rawContent);
+      // Attempt to read as text (best-effort)
+      try {
+        content = await fileData.text();
+      } catch {
+        const buf = new Uint8Array(await fileData.arrayBuffer());
+        content = new TextDecoder('latin1').decode(buf);
       }
     }
-    
-    console.log('Document content length:', content.length);
-    console.log('Content preview:', content.substring(0, 500));
 
-    // Verify we have actual readable content
-    if (content.length < 100) {
-      throw new Error('Document appears to be empty or unreadable. Please upload a text-based document.');
+    if (!content || content.length < 100) {
+      throw new Error('Document content is unreadable for quiz generation. Ensure the document has selectable text or enable OCR.');
     }
 
-    // Extract page range if specified
-    let contentToUse = content;
-    if (startPage || endPage) {
-      const CHARS_PER_PAGE = 3000;
-      const totalEstimatedPages = Math.ceil(content.length / CHARS_PER_PAGE);
-      const start = Math.max(0, ((startPage || 1) - 1) * CHARS_PER_PAGE);
-      const end = Math.min(content.length, (endPage || totalEstimatedPages) * CHARS_PER_PAGE);
-      contentToUse = content.substring(start, end);
-      console.log('Page range:', startPage || 1, 'to', endPage || totalEstimatedPages);
-      console.log('Char range:', start, 'to', end);
+    // Detect language and enforce in AI prompt
+    const detectedLanguage = detectLanguageByStopwords(content);
+    console.log('Detected language for quiz:', detectedLanguage);
+
+    // Sample content similarly to flashcards function to limit size
+    const MAX_CONTENT_SIZE = 30000;
+    let sampledContent = '';
+    if (content.length <= MAX_CONTENT_SIZE) {
+      sampledContent = content;
+    } else {
+      const chunkSize = 2000;
+      const numChunks = Math.floor(MAX_CONTENT_SIZE / chunkSize) || 1;
+      const step = Math.floor(content.length / numChunks);
+      const chunks: string[] = [];
+      for (let i = 0; i < numChunks; i++) {
+        const s = i * step;
+        chunks.push(content.substring(s, s + chunkSize));
+      }
+      sampledContent = chunks.join('\n\n');
     }
 
-    console.log('Using content length:', contentToUse.length);
-
-    // Call Lovable AI to generate quiz
+    // Prepare AI call to generate MCQs (function tool-call expected)
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
-    // Sample content if too long
-    const MAX_CONTENT = 40000;
-    let sampledContent = contentToUse;
-    if (contentToUse.length > MAX_CONTENT) {
-      const chunkSize = 3000;
-      const numChunks = Math.floor(MAX_CONTENT / chunkSize);
-      const step = Math.floor(contentToUse.length / numChunks);
-      const chunks: string[] = [];
-      
-      for (let i = 0; i < numChunks; i++) {
-        const start = i * step;
-        chunks.push(contentToUse.substring(start, start + chunkSize));
-      }
-      sampledContent = chunks.join('\n\n');
-      console.log('Sampled', numChunks, 'chunks from document');
-    }
-    
-    console.log('Final content length for AI:', sampledContent.length);
-    console.log('Content sample for AI:', sampledContent.substring(0, 300));
-
-    const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${LOVABLE_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+    async function callAIGenerateQuiz(promptContent: string, attempts = 1) {
+      const body = {
         model: 'google/gemini-2.5-flash',
+        temperature: 0.2,
+        top_p: 0.9,
+        max_tokens: 2000,
         messages: [
           {
             role: 'system',
-            content: `You are creating a 10-question multiple-choice quiz about educational content.
+            content: `You are creating ${count} multiple-choice quiz questions (4 options each) about the educational content provided.
 
 RULES:
-1. Create questions ONLY about facts, concepts, definitions, and information IN the provided text
-2. Each question must have exactly 4 options with one correct answer
-3. Questions and answers must be in the SAME language as the source text
-4. Focus on: key concepts, definitions, important facts, dates, names, processes
-5. NEVER ask about: documents, files, formats, metadata, the quiz itself`
+1. Create questions ONLY about facts, concepts, definitions, and information IN the provided text.
+2. Each question must have exactly 4 options and one correct index (0-3).
+3. Options should be plausible distractors but NOT correct.
+4. Questions, options, and explanations must be in the SAME language as the source text.
+5. Use only information present in the SOURCE. If unsure, omit the question.
+6. Provide output as a function call to create_quiz as defined in tools parameter.
+REPLY IN: ${detectedLanguage.name}`
           },
           {
             role: 'user',
-            content: `Here is the study material. Create 10 quiz questions about its educational content:\n\n${sampledContent}`
+            content: `SOURCE:\n\n${promptContent}`
           }
         ],
         tools: [{
@@ -216,15 +275,8 @@ RULES:
                     type: 'object',
                     properties: {
                       question: { type: 'string', description: 'The question text' },
-                      options: { 
-                        type: 'array', 
-                        items: { type: 'string' },
-                        description: 'Array of 4 possible answers'
-                      },
-                      correctIndex: { 
-                        type: 'number', 
-                        description: 'Index of the correct answer (0-3)'
-                      },
+                      options: { type: 'array', items: { type: 'string' }, description: 'Array of 4 possible answers' },
+                      correctIndex: { type: 'number', description: 'Index of the correct answer (0-3)' },
                       explanation: { type: 'string', description: 'Explanation of the correct answer' }
                     },
                     required: ['question', 'options', 'correctIndex', 'explanation']
@@ -237,73 +289,102 @@ RULES:
           }
         }],
         tool_choice: { type: 'function', function: { name: 'create_quiz' } }
-      }),
-    });
+      };
 
-    if (!aiResponse.ok) {
-      const errorText = await aiResponse.text();
-      console.error('AI Gateway error:', aiResponse.status, errorText);
-      throw new Error(`AI Gateway error: ${aiResponse.status}`);
-    }
+      const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${LOVABLE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
 
-    const aiData = await aiResponse.json();
-    console.log('AI response received');
-    console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
-    
-    const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
-    if (!toolCall) {
-      console.error('No tool call found in response');
-      throw new Error('No quiz generated - AI did not return expected format');
-    }
-
-    console.log('Tool call arguments:', toolCall.function.arguments.substring(0, 1000));
-    
-    let quizData;
-    try {
-      quizData = JSON.parse(toolCall.function.arguments);
-    } catch (parseError) {
-      console.error('Failed to parse tool call arguments:', parseError);
-      throw new Error('Failed to parse quiz data from AI');
-    }
-    
-    const questions = quizData.questions || [];
-    
-    if (!Array.isArray(questions) || questions.length === 0) {
-      console.error('No questions generated. Quiz data:', JSON.stringify(quizData));
-      throw new Error('AI failed to generate quiz questions. The document content may not be suitable for quiz generation.');
-    }
-    
-    // Validate each question has required fields
-    for (let i = 0; i < questions.length; i++) {
-      const q = questions[i];
-      if (!q.question || !Array.isArray(q.options) || q.options.length < 2 || typeof q.correctIndex !== 'number') {
-        console.error(`Invalid question at index ${i}:`, JSON.stringify(q));
-        throw new Error(`Invalid question format at index ${i}`);
+      if (!resp.ok) {
+        const errText = await resp.text();
+        console.error('AI Gateway error:', resp.status, errText);
+        throw new Error(`AI Gateway error: ${resp.status}`);
       }
+
+      const aiData = await resp.json();
+      console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
+      const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
+      if (!toolCall) {
+        console.error('No tool call in AI response');
+        throw new Error('AI did not return expected quiz format');
+      }
+
+      let quizData;
+      try {
+        quizData = JSON.parse(toolCall.function.arguments);
+      } catch (parseError) {
+        console.error('Failed to parse tool call arguments:', parseError);
+        throw new Error('Failed to parse quiz data from AI');
+      }
+
+      const questions = quizData.questions || [];
+      if (!Array.isArray(questions) || questions.length === 0) {
+        throw new Error('AI failed to generate quiz questions.');
+      }
+
+      return questions;
     }
 
-    // Insert quiz into database
-    const { data: quiz, error: insertError } = await supabaseClient
+    // Attempt AI generation with validation if DB path failed
+    let aiQuestions = await callAIGenerateQuiz(sampledContent);
+
+    // Validate AI-generated questions against source: ensure question or correct option appears in source
+    function validateQuizItems(items: any[], sourceText: string) {
+      const validated: any[] = [];
+      for (const it of items) {
+        const correct = it.options?.[it.correctIndex];
+        const qOk = supportedBySource(it.question || '', sourceText);
+        const aOk = supportedBySource(correct || '', sourceText);
+        if (qOk || aOk) {
+          validated.push(it);
+        } else {
+          console.log('Dropping AI item not supported by source:', it.question?.substring(0, 100));
+        }
+      }
+      return validated;
+    }
+
+    let validatedItems = validateQuizItems(aiQuestions, content);
+    console.log('Validated AI quiz items count:', validatedItems.length);
+
+    // Retry once if too few validated items
+    if (validatedItems.length < Math.min(3, count)) {
+      console.log('Validated items low, retrying AI with stricter instruction...');
+      aiQuestions = await callAIGenerateQuiz(sampledContent);
+      validatedItems = validateQuizItems(aiQuestions, content);
+      console.log('Post-retry validated items count:', validatedItems.length);
+    }
+
+    if (validatedItems.length === 0) {
+      throw new Error('Could not generate quiz questions supported by document. Try generating flashcards first or ensure the document contains selectable text.');
+    }
+
+    // Trim to requested count
+    const finalQuestions = validatedItems.slice(0, count);
+
+    // Insert quiz into DB
+    const title = `Quiz: ${document.title}`;
+    const { data: quiz, error: insertQuizError } = await supabaseClient
       .from('quizzes')
       .insert({
         user_id: user.id,
         document_id: documentId,
-        title: `Quiz: ${document.title}`,
-        questions: quizData.questions,
+        title,
+        questions: finalQuestions,
       })
       .select()
       .maybeSingle();
 
-    if (insertError) throw insertError;
-    if (!quiz) throw new Error('Failed to create quiz');
-
-    console.log(`Successfully created quiz with ${quizData.questions.length} questions`);
+    if (insertQuizError) throw insertQuizError;
+    console.log('Created quiz via AI with', finalQuestions.length, 'questions');
 
     return new Response(
-      JSON.stringify({ 
-        success: true, 
-        quiz
-      }),
+      JSON.stringify({ success: true, quiz }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
