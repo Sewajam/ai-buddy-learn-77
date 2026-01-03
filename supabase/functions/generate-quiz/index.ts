@@ -233,7 +233,7 @@ serve(async (req) => {
     shuffle(rawSentences);
 
     // Helper builds MCQ from a flashcard, tries to find 3 distractors using improved flow
-    function buildMCQFromCard(card: any, otherAnswers: string[], sourceText: string): { question: string; options: string[]; correctIndex: number; explanation: string } | null {
+    async function buildMCQFromCard(card: any, otherAnswers: string[], sourceText: string): Promise<{ question: string; options: string[]; correctIndex: number; explanation: string } | null> {
       const question = card.question;
       const correct = card.answer;
       const candidates: string[] = [];
@@ -414,8 +414,12 @@ RULES:
       const validated: any[] = [];
       for (const it of items) {
         const correct = it.options?.[it.correctIndex];
-        const qOk = supportedBySource(it.question || '', sourceText);
-        const aOk = supportedBySource(correct || '', sourceText);
+        // Check if question or answer contains keywords from source
+        const questionWords = (it.question || '').toLowerCase().split(/\s+/).filter((w: string) => w.length > 4);
+        const answerWords = (correct || '').toLowerCase().split(/\s+/).filter((w: string) => w.length > 4);
+        const sourceTextLower = sourceText.toLowerCase();
+        const qOk = questionWords.some((w: string) => sourceTextLower.includes(w));
+        const aOk = answerWords.some((w: string) => sourceTextLower.includes(w));
         if (qOk || aOk) validated.push(it);
       }
       return validated;

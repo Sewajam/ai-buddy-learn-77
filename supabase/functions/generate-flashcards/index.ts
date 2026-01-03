@@ -573,7 +573,8 @@ ${instructionExtension}`
         const classified = classifyAnswerDifficulty(c.answer);
         if (classified !== declared) c.difficulty = classified;
         validated.push(c);
-        counts[c.difficulty] = (counts[c.difficulty] || 0) + 1;
+        const diff = c.difficulty as 'easy' | 'medium' | 'hard';
+        counts[diff] = (counts[diff] || 0) + 1;
       }
       const supportRate = cards.length ? (supported / cards.length) : 0;
       return { validated, supportRate, counts };
