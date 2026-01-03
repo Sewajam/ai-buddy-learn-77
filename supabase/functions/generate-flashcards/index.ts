@@ -693,8 +693,6 @@ ${instructionExtension}`
       question: card.question,
       answer: card.answer,
       difficulty: card.difficulty || 'medium',
-      page_from: card.page_from ?? null,
-      page_to: card.page_to ?? null,
     }));
 
     const { error: insertError } = await supabaseClient.from('flashcards').insert(flashcardsToInsert);
