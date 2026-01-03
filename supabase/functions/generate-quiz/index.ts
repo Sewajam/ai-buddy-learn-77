@@ -207,24 +207,59 @@ serve(async (req) => {
     if (cardsError) throw cardsError;
     const validatedCards = Array.isArray(existingCards) ? existingCards : [];
 
-    // Download document content for fallback and validation if needed
+    // Download document content - use AI for PDF extraction
     let content = document.content || '';
+    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
+    if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
+    
     if (!content || content.length < 100) {
       const { data: fileData, error: fileError } = await supabaseClient
         .storage
         .from('documents')
         .download(document.file_path);
       if (fileError) throw fileError;
-      try {
-        content = await fileData.text();
-      } catch {
-        const buf = new Uint8Array(await fileData.arrayBuffer());
-        content = new TextDecoder('latin1').decode(buf);
+      
+      const rawBuffer = new Uint8Array(await fileData.arrayBuffer());
+      const pdfMagic = String.fromCharCode(...rawBuffer.slice(0, 5));
+      const isPDF = pdfMagic === '%PDF-';
+      
+      if (isPDF) {
+        console.info('PDF detected, using AI for text extraction. Size:', rawBuffer.length);
+        const pdfBase64 = btoa(String.fromCharCode(...rawBuffer));
+        
+        const extractResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'google/gemini-2.5-flash',
+            messages: [
+              { 
+                role: 'user', 
+                content: [
+                  { type: 'text', text: 'Extract ALL the text content from this PDF document. Return ONLY the extracted text, preserving the structure and formatting. Do not add any commentary or explanations. Just output the raw text content from the document.' },
+                  { type: 'file', file: { filename: 'document.pdf', file_data: `data:application/pdf;base64,${pdfBase64}` } }
+                ]
+              }
+            ],
+            max_tokens: 16000,
+          }),
+        });
+        
+        if (extractResponse.ok) {
+          const extractData = await extractResponse.json();
+          content = extractData.choices?.[0]?.message?.content || '';
+          console.info('AI extracted text length:', content.length);
+        } else {
+          console.error('AI extraction failed:', extractResponse.status, await extractResponse.text());
+          throw new Error('Could not extract text from PDF for quiz generation.');
+        }
+      } else {
+        content = new TextDecoder('utf-8').decode(rawBuffer);
       }
     }
 
     if (!content || content.length < 100) {
-      throw new Error('Document content unreadable for quiz generation. Ensure selectable text or enable OCR.');
+      throw new Error('Document content unreadable for quiz generation.');
     }
 
     // Prepare sentences from content to use as candidate distractors
@@ -333,8 +368,7 @@ serve(async (req) => {
       return chunks.join('\n\n');
     })();
 
-    const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
-    if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
+    // LOVABLE_API_KEY already declared above
 
     // AI-based quiz generation (same as previous); keep validation of items using the same validators above
     async function callAIGenerateQuiz(promptContent: string) {
