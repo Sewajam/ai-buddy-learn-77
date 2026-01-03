@@ -1,5 +1,10 @@
 // supabase/functions/generate-flashcards/index.ts
-// Updated: deduplication and per-card confidence (returned in response).
+// Fully integrated: page-aware chunking + page_from/page_to mapping,
+// robust extraction (binary handling + OCR fallback), language detection,
+// relevance-based chunk selection, validation, dedupe, and DB insertion.
+//
+// NOTE: This file expects the database to have added integer columns
+// `page_from` and `page_to` to the public.flashcards table (migration needed).
 
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -10,15 +15,25 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// --- Helper functions (extraction, cleaning, OCR, tokenization, chunking, scoring) ---
-// (These are the same helpers used in previous version: extractTextFromPDF, isBinaryContentFromBuffer, cleanTextContent,
-// callExternalOCR, tokenizeWords, getTopKeywords, chunkTextByChars, scoreChunksByKeywords, selectTopChunks,
-// detectLanguageByStopwords, supportedBySource)
-// For brevity in this view, keep all previous helper implementations exactly as before (they remain in the real file).
+// -------------------- Config --------------------
+const CHARS_PER_PAGE_ESTIMATE = 3000;
+const CHUNK_SIZE = 2200;
+const CHUNK_OVERLAP = 300;
+const MAX_CONTENT_SIZE = 30000; // characters
+const DEDUPE_JACCARD_THRESHOLD = 0.7;
+const SUPPORT_RETRY_THRESHOLD = 0.6;
+const MIN_ACCEPT_SUPPORT_RATE = 0.5;
 
-// Minimal implementations are included here (keep them consistent with earlier version).
+// -------------------- Utility helpers --------------------
+
+function collapseWhitespace(s: string) {
+  return s.replace(/\r\n/g, '\n').replace(/\s+/g, ' ').trim();
+}
+
+// Extract readable text from PDF-like binary content using heuristics
 function extractTextFromPDF(binaryContent: string): string {
   const textParts: string[] = [];
+
   const tjMatches = binaryContent.match(/\(([^)]+)\)\s*Tj/g);
   if (tjMatches) {
     for (const match of tjMatches) {
@@ -26,6 +41,7 @@ function extractTextFromPDF(binaryContent: string): string {
       if (text && /^[\x20-\x7E\s]+$/.test(text)) textParts.push(text);
     }
   }
+
   const asciiMatches = binaryContent.match(/[\x20-\x7E]{20,}/g);
   if (asciiMatches) {
     for (const match of asciiMatches) {
@@ -39,12 +55,15 @@ function extractTextFromPDF(binaryContent: string): string {
       }
     }
   }
-  return textParts.join(' ').replace(/\s+/g, ' ').trim();
+
+  return collapseWhitespace(textParts.join(' '));
 }
 
+// Heuristic binary detection from raw bytes
 function isBinaryContentFromBuffer(buf: Uint8Array): boolean {
   const pdfMagic = String.fromCharCode(...buf.slice(0, 5));
   if (pdfMagic === '%PDF-') return true;
+
   const sampleLen = Math.min(buf.length, 1000);
   let nonPrintable = 0;
   for (let i = 0; i < sampleLen; i++) {
@@ -54,6 +73,7 @@ function isBinaryContentFromBuffer(buf: Uint8Array): boolean {
   return (nonPrintable / Math.max(1, sampleLen)) > 0.1;
 }
 
+// Clean text: remove control chars, collapse whitespace
 function cleanTextContent(content: string): string {
   let cleaned = content.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, ' ');
   cleaned = cleaned.replace(/\s+/g, ' ');
@@ -61,6 +81,7 @@ function cleanTextContent(content: string): string {
   return cleaned.trim();
 }
 
+// Very small OCR caller (expects OCR_API_URL that accepts { file: base64 } and returns { text })
 async function callExternalOCR(apiUrl: string, apiKey: string, fileBase64: string): Promise<string> {
   try {
     const resp = await fetch(apiUrl, {
@@ -83,6 +104,7 @@ async function callExternalOCR(apiUrl: string, apiKey: string, fileBase64: strin
   }
 }
 
+// Tokenization & stopword set (lightweight)
 const STOPWORDS = new Set([
   'the','and','is','in','to','of','a','that','it','on','for','as','with','was','were','be','by','an','this','which','or','are','from','at','but','not','have','has','had'
 ]);
@@ -95,7 +117,7 @@ function tokenizeWords(text: string): string[] {
     .filter(Boolean);
 }
 
-function getTopKeywords(text: string, topK = 50): string[] {
+function getTopKeywords(text: string, topK = 60) {
   const tokens = tokenizeWords(text);
   const freq: Record<string, number> = {};
   for (const t of tokens) {
@@ -103,40 +125,76 @@ function getTopKeywords(text: string, topK = 50): string[] {
     if (STOPWORDS.has(t)) continue;
     freq[t] = (freq[t] || 0) + 1;
   }
-  const entries = Object.entries(freq).sort((a, b) => b[1] - a[1]);
-  return entries.slice(0, topK).map(e => e[0]);
+  return Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0, topK).map(e=>e[0]);
 }
 
-type Chunk = { id: string; text: string; start: number; end: number; score?: number };
+// Page splitting: try to preserve explicit page boundaries, else estimate by CHARS_PER_PAGE_ESTIMATE
+function splitIntoPages(content: string): string[] {
+  // Try common page separators
+  if (!content) return [];
+  // 1) Form feed characters
+  let pages = content.split(/\f/).map(s=>s.trim()).filter(Boolean);
+  if (pages.length > 1) return pages;
+  // 2) Lines like "Page 1" - split before "Page <num>"
+  pages = content.split(/\n(?=Page\s+\d+\b)/).map(s=>s.trim()).filter(Boolean);
+  if (pages.length > 1) return pages;
+  // 3) Fall back to estimate by characters per page
+  const total = content.length;
+  const numPages = Math.max(1, Math.ceil(total / CHARS_PER_PAGE_ESTIMATE));
+  const res: string[] = [];
+  for (let i = 0; i < numPages; i++) {
+    const start = i * CHARS_PER_PAGE_ESTIMATE;
+    const end = Math.min(total, (i+1) * CHARS_PER_PAGE_ESTIMATE);
+    res.push(content.slice(start, end).trim());
+  }
+  return res.filter(Boolean);
+}
 
-function chunkTextByChars(text: string, chunkSize = 2000, overlap = 300): Chunk[] {
+// Chunk a page's text into chunks with overlap. Each chunk will carry page_from/page_to metadata.
+type Chunk = { id: string; text: string; page_from: number; page_to: number; start: number; end: number; score?: number };
+function chunkPagesToChunks(pages: string[], chunkSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP): Chunk[] {
   const chunks: Chunk[] = [];
-  let start = 0;
   let id = 0;
-  while (start < text.length) {
-    const end = Math.min(start + chunkSize, text.length);
-    const slice = text.slice(start, end).trim();
-    if (slice) chunks.push({ id: `c${id++}`, text: slice, start, end });
-    start = end - overlap;
-    if (start < 0) start = 0;
-    if (end === text.length) break;
+  let globalOffset = 0;
+  for (let p = 0; p < pages.length; p++) {
+    const pageText = pages[p] || '';
+    let start = 0;
+    while (start < pageText.length) {
+      const end = Math.min(start + chunkSize, pageText.length);
+      const slice = pageText.slice(start, end).trim();
+      if (slice) {
+        chunks.push({
+          id: `c${id++}`,
+          text: slice,
+          page_from: p + 1,
+          page_to: p + 1,
+          start: globalOffset + start,
+          end: globalOffset + end,
+        });
+      }
+      start = end - overlap;
+      if (start < 0) start = 0;
+      if (end === pageText.length) break;
+    }
+    globalOffset += pageText.length;
   }
   return chunks;
 }
 
+// Score chunks by keyword overlap
 function scoreChunksByKeywords(chunks: Chunk[], keywords: string[]): Chunk[] {
   if (!keywords || keywords.length === 0) return chunks;
-  const kwSet = new Set(keywords);
+  const kw = new Set(keywords);
   for (const c of chunks) {
     const tokens = tokenizeWords(c.text);
     let score = 0;
-    for (const t of tokens) if (kwSet.has(t)) score++;
+    for (const t of tokens) if (kw.has(t)) score++;
     c.score = score;
   }
-  return chunks.sort((a, b) => (b.score || 0) - (a.score || 0));
+  return chunks.sort((a,b)=> (b.score||0) - (a.score||0));
 }
 
-function selectTopChunks(chunks: Chunk[], maxChars = 30000): Chunk[] {
+function selectTopChunksByChars(chunks: Chunk[], maxChars = MAX_CONTENT_SIZE): Chunk[] {
   const selected: Chunk[] = [];
   let used = 0;
   for (const c of chunks) {
@@ -148,79 +206,75 @@ function selectTopChunks(chunks: Chunk[], maxChars = 30000): Chunk[] {
   return selected;
 }
 
+// Basic small-language detection via stopword frequency
 function detectLanguageByStopwords(text: string): { code: string; name: string; confidence: number } {
-  const samples = {
-    en: ['the', 'and', 'is', 'in', 'to', 'of', 'a', 'that'],
-    es: ['de', 'la', 'que', 'el', 'en', 'y', 'los', 'se'],
-    fr: ['de', 'la', 'et', 'les', 'des', 'le', 'est', 'en'],
-    de: ['der', 'die', 'und', 'in', 'zu', 'den', 'das', 'ist'],
-    pt: ['de', 'que', 'e', 'o', 'a', 'do', 'da', 'em'],
-    it: ['di', 'e', 'il', 'la', 'che', 'in', 'a', 'per'],
+  const samples: Record<string,string[]> = {
+    en: ['the','and','is','in','to','of','a','that'],
+    es: ['de','la','que','el','en','y','los','se'],
+    fr: ['de','la','et','les','des','le','est','en'],
+    de: ['der','die','und','in','zu','den','das','ist'],
+    pt: ['de','que','e','o','a','do','da','em'],
+    it: ['di','e','il','la','che','in','a','per'],
   };
   const lower = text.toLowerCase();
   const counts: Record<string, number> = {};
-  let totalMatches = 0;
-  for (const [code, words] of Object.entries(samples)) {
+  let total = 0;
+  for (const [k, words] of Object.entries(samples)) {
     let c = 0;
     for (const w of words) {
-      const regex = new RegExp(`\\b${w}\\b`, 'g');
-      const matches = lower.match(regex);
-      if (matches) c += matches.length;
+      const m = lower.match(new RegExp(`\\b${w}\\b`, 'g'));
+      if (m) c += m.length;
     }
-    counts[code] = c;
-    totalMatches += c;
+    counts[k] = c;
+    total += c;
   }
-  let best = 'en';
-  let bestCount = 0;
-  for (const [k, v] of Object.entries(counts)) {
+  let best = 'en'; let bestCount = 0;
+  for (const [k,v] of Object.entries(counts)) {
     if (v > bestCount) { best = k; bestCount = v; }
   }
-  const confidence = totalMatches ? bestCount / totalMatches : 0;
-  const names: Record<string, string> = { en: 'English', es: 'Spanish', fr: 'French', de: 'German', pt: 'Portuguese', it: 'Italian' };
+  const confidence = total ? bestCount / total : 0;
+  const names: Record<string,string> = { en:'English', es:'Spanish', fr:'French', de:'German', pt:'Portuguese', it:'Italian' };
   return { code: best, name: names[best] || best, confidence };
 }
 
-// --- New: Deduplication and confidence computation ---
-
-function normalizeTextForSimilarity(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+// Simple token-presence support check
+function supportedBySource(needle: string, haystack: string): boolean {
+  if (!needle || !haystack) return false;
+  const tokens = tokenizeWords(needle).filter(t => t.length >= 3);
+  if (tokens.length === 0) return false;
+  const hs = haystack.toLowerCase();
+  for (const t of tokens) {
+    if (hs.includes(t)) return true;
+  }
+  return false;
 }
 
+// Jaccard similarity for dedupe
 function computeJaccard(a: string, b: string): number {
-  const sa = new Set(tokenizeWords(normalizeTextForSimilarity(a)));
-  const sb = new Set(tokenizeWords(normalizeTextForSimilarity(b)));
+  const sa = new Set(tokenizeWords(a));
+  const sb = new Set(tokenizeWords(b));
   if (sa.size === 0 || sb.size === 0) return 0;
-  const intersection = [...sa].filter(x => sb.has(x)).length;
+  const inter = [...sa].filter(x => sb.has(x)).length;
   const union = new Set([...sa, ...sb]).size;
-  return union === 0 ? 0 : intersection / union;
+  return union === 0 ? 0 : inter / union;
 }
 
-// Confidence/support score between 0 and 1: average of question-support and answer-support token overlap ratios
-function computeSupportScore(card: { question: string; answer: string }, source: string): number {
-  const qTokens = tokenizeWords(normalizeTextForSimilarity(card.question || ''));
-  const aTokens = tokenizeWords(normalizeTextForSimilarity(card.answer || ''));
-  const sourceTokens = new Set(tokenizeWords(normalizeTextForSimilarity(source)));
-  function overlapRatio(tokens: string[]) {
-    if (!tokens.length) return 0;
+function computeSupportScore(card: {question:string, answer:string}, source: string): number {
+  const qTokens = tokenizeWords(card.question||'').filter(t=>t.length>=3);
+  const aTokens = tokenizeWords(card.answer||'').filter(t=>t.length>=3);
+  const sourceSet = new Set(tokenizeWords(source));
+  function overlapRatio(tokens:string[]) {
+    if (tokens.length===0) return 0;
     let matches = 0;
-    for (const t of tokens) {
-      if (t.length < 3) continue;
-      if (sourceTokens.has(t)) matches++;
-    }
+    for (const t of tokens) if (sourceSet.has(t)) matches++;
     return tokens.length ? matches / tokens.length : 0;
   }
   const qScore = overlapRatio(qTokens);
   const aScore = overlapRatio(aTokens);
-  // weight answer slightly higher
-  return Math.min(1, (0.4 * qScore) + (0.6 * aScore));
+  return Math.min(1, (0.4*qScore) + (0.6*aScore));
 }
 
-// Remove near-duplicate cards based on combined question+answer similarity
-function dedupeCards(cards: any[], threshold = 0.7): any[] {
+function dedupeCards(cards: any[], threshold = DEDUPE_JACCARD_THRESHOLD) {
   const unique: any[] = [];
   for (const c of cards) {
     const combined = `${c.question} ||| ${c.answer}`;
@@ -230,7 +284,6 @@ function dedupeCards(cards: any[], threshold = 0.7): any[] {
       const sim = computeJaccard(combined, uCombined);
       if (sim >= threshold) {
         isDup = true;
-        // keep the card with higher confidence if present
         if ((c.confidence || 0) > (u.confidence || 0)) {
           u.question = c.question;
           u.answer = c.answer;
@@ -245,7 +298,8 @@ function dedupeCards(cards: any[], threshold = 0.7): any[] {
   return unique;
 }
 
-// --- Main serverless handler (flow kept from previous version) ---
+// -------------------- Main handler --------------------
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -253,7 +307,6 @@ serve(async (req) => {
 
   try {
     const { documentId, count = 10, difficulty = 'mixed', startPage, endPage } = await req.json();
-    console.log('Generating flashcards for document:', documentId, 'count:', count, 'difficulty:', difficulty, 'pages:', startPage, '-', endPage);
 
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) throw new Error('No authorization header');
@@ -273,10 +326,10 @@ serve(async (req) => {
       .select('*')
       .eq('id', documentId)
       .maybeSingle();
-
     if (docError) throw docError;
     if (!document) throw new Error('Document not found');
 
+    // Use stored content if available, otherwise download and extract
     let content = document.content || '';
     let usedOcr = false;
     let detectedLanguage = { code: 'und', name: 'Unknown', confidence: 0 };
@@ -289,16 +342,11 @@ serve(async (req) => {
       if (fileError) throw fileError;
 
       const rawBuffer = new Uint8Array(await fileData.arrayBuffer());
-      console.log('Downloaded file bytes:', rawBuffer.length);
-
       const looksBinary = isBinaryContentFromBuffer(rawBuffer);
-      console.log('looksBinary:', looksBinary);
 
       if (looksBinary) {
         const rawLatin1 = new TextDecoder('latin1').decode(rawBuffer);
         content = extractTextFromPDF(rawLatin1);
-        console.log('Extracted text length from pdf heuristics:', content.length);
-
         if (!content || content.length < 100) {
           const OCR_API_URL = Deno.env.get('OCR_API_URL') ?? '';
           const OCR_API_KEY = Deno.env.get('OCR_API_KEY') ?? '';
@@ -308,16 +356,14 @@ serve(async (req) => {
             if (ocrText && ocrText.length > content.length) {
               usedOcr = true;
               content = ocrText;
-              console.log('OCR returned text length:', content.length);
             }
           } else {
-            throw new Error('Could not extract selectable text from this PDF (likely scanned). Enable OCR or upload text-based doc.');
+            throw new Error('Could not extract selectable text from this PDF (likely scanned). Enable OCR or upload a text-based document.');
           }
         }
       } else {
         const rawText = new TextDecoder('utf-8').decode(rawBuffer);
         content = cleanTextContent(rawText);
-        console.log('Treated file as text, length:', content.length);
       }
     }
 
@@ -326,50 +372,49 @@ serve(async (req) => {
     }
 
     detectedLanguage = detectLanguageByStopwords(content);
-    console.log('Detected language:', detectedLanguage);
 
-    // Relevance selection (chunking & keywords) - same as earlier version
-    const CHUNK_SIZE = 2200;
-    const OVERLAP = 300;
-    const MAX_CONTENT_SIZE = 30000;
-    const allChunks = chunkTextByChars(content, CHUNK_SIZE, OVERLAP);
-    console.log('Total chunks created:', allChunks.length);
-
-    let contentForKeywords = content;
+    // Page-aware splitting
+    const pages = splitIntoPages(content);
+    // If user requested page range, narrow pages
+    let pagesToUse = pages;
     if (startPage || endPage) {
-      const CHARS_PER_PAGE = 3000;
-      const totalEstimatedPages = Math.ceil(content.length / CHARS_PER_PAGE);
-      const start = Math.max(0, ((startPage || 1) - 1) * CHARS_PER_PAGE);
-      const end = Math.min(content.length, (endPage || totalEstimatedPages) * CHARS_PER_PAGE);
-      contentForKeywords = content.substring(start, end);
-      console.log('Keyword extraction range:', start, 'to', end);
+      const from = Math.max(1, startPage || 1);
+      const to = Math.min(pages.length, endPage || pages.length);
+      pagesToUse = pages.slice(from-1, to);
     }
 
+    // Build chunks per page
+    const allChunks = chunkPagesToChunks(pagesToUse, CHUNK_SIZE, CHUNK_OVERLAP);
+
+    // Relevance scoring via keywords
+    const contentForKeywords = pagesToUse.join(' ');
     const topKeywords = getTopKeywords(contentForKeywords, 60);
-    console.log('Top keywords (sample):', topKeywords.slice(0, 12));
     let scoredChunks = scoreChunksByKeywords(allChunks, topKeywords);
-    const totalScore = scoredChunks.reduce((s, c) => s + (c.score || 0), 0);
+
+    // If scoring yields zero scores, fallback to evenly spaced sampling across content
+    const totalScore = scoredChunks.reduce((s,c)=>s+(c.score||0),0);
     let selectedChunks: Chunk[] = [];
     if (totalScore === 0) {
-      console.log('Keyword scoring yielded zero total score — falling back to even sampling.');
-      const chunkSize = 2000;
-      const numChunks = Math.floor(MAX_CONTENT_SIZE / chunkSize) || 1;
-      const step = Math.floor(content.length / numChunks);
-      const fallback: Chunk[] = [];
+      // evenly sample across pagesToUse
+      const fallbackChunks: Chunk[] = [];
+      const flat = pagesToUse.join('\n\n');
+      const numChunks = Math.floor(MAX_CONTENT_SIZE / CHUNK_SIZE) || 1;
+      const step = Math.floor(flat.length / numChunks);
       for (let i = 0; i < numChunks; i++) {
         const s = i * step;
-        fallback.push({ id: `f${i}`, text: content.substring(s, s + chunkSize), start: s, end: s + chunkSize });
+        const slice = flat.substring(s, s + CHUNK_SIZE);
+        fallbackChunks.push({ id:`f${i}`, text: slice, page_from: 1, page_to: pagesToUse.length, start:s, end:s+slice.length });
       }
-      selectedChunks = fallback;
+      selectedChunks = fallbackChunks;
     } else {
-      selectedChunks = selectTopChunks(scoredChunks, MAX_CONTENT_SIZE);
+      selectedChunks = selectTopChunksByChars(scoredChunks, MAX_CONTENT_SIZE);
     }
 
-    console.log('Selected chunk ids:', selectedChunks.map(c => `${c.id}@${c.start}-${c.end}`));
-    const sampledContent = selectedChunks.map(c => c.text).join('\n\n');
-    console.log('Sampled content length after relevance selection:', sampledContent.length);
+    // Prepare sampled content for prompt and include page markers
+    const sampledContentParts: string[] = selectedChunks.map(c => `SOURCE (pages ${c.page_from}${c.page_to && c.page_to !== c.page_from ? `-${c.page_to}` : ''}):\n${c.text}`);
+    const sampledContent = sampledContentParts.join('\n\n');
 
-    // Prepare prompt parts (few-shot examples etc)
+    // Prepare prompt with few-shot examples and language enforcement + deterministic params
     const difficultyInstruction = difficulty === 'mixed'
       ? 'Create a balanced mix: some easy (basic facts), some medium (connections), some hard (analysis)'
       : `All ${difficulty} difficulty`;
@@ -415,8 +460,7 @@ RULES:
 5. NEVER ask about: documents, files, systems, formats, metadata, flashcards themselves
 BE SURE: Use ONLY the information present inside the SOURCE text provided by the user. If an answer is not explicitly supported by the SOURCE, omit that card. Output should be a function call to create_flashcards as defined in the tools parameter.
 REPLY IN: ${detectedLanguage.name}
-${instructionExtension}
-`
+${instructionExtension}`
           },
           {
             role: 'user',
@@ -436,11 +480,11 @@ ${instructionExtension}
                   items: {
                     type: 'object',
                     properties: {
-                      question: { type: 'string', description: 'The flashcard question' },
-                      answer: { type: 'string', description: 'The answer' },
-                      difficulty: { type: 'string', enum: ['easy', 'medium', 'hard'] }
+                      question: { type: 'string' },
+                      answer: { type: 'string' },
+                      difficulty: { type: 'string', enum: ['easy','medium','hard'] }
                     },
-                    required: ['question', 'answer', 'difficulty']
+                    required: ['question','answer','difficulty']
                   },
                   minItems: 1
                 }
@@ -452,7 +496,7 @@ ${instructionExtension}
         tool_choice: { type: 'function', function: { name: 'create_flashcards' } }
       };
 
-      const aiResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+      const r = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${LOVABLE_API_KEY}`,
@@ -461,16 +505,13 @@ ${instructionExtension}
         body: JSON.stringify(body),
       });
 
-      if (!aiResponse.ok) {
-        const errorText = await aiResponse.text();
-        console.error('AI Gateway error:', aiResponse.status, errorText);
-        throw new Error(`AI Gateway error: ${aiResponse.status}`);
+      if (!r.ok) {
+        const errText = await r.text();
+        console.error('AI Gateway error:', r.status, errText);
+        throw new Error(`AI Gateway error: ${r.status}`);
       }
 
-      const aiData = await aiResponse.json();
-      console.log('AI response received');
-      console.log('AI response structure:', JSON.stringify(aiData, null, 2).substring(0, 2000));
-
+      const aiData = await r.json();
       const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
       if (!toolCall) {
         console.error('No tool call found in response');
@@ -480,23 +521,23 @@ ${instructionExtension}
       let flashcardsData;
       try {
         flashcardsData = JSON.parse(toolCall.function.arguments);
-      } catch (parseError) {
-        console.error('Failed to parse tool call arguments:', parseError);
+      } catch (err) {
+        console.error('Failed to parse tool call args:', err);
         throw new Error('Failed to parse flashcard data from AI');
       }
 
       const flashcards = flashcardsData.flashcards || [];
       if (!Array.isArray(flashcards) || flashcards.length === 0) {
-        console.error('No flashcards generated. Data:', JSON.stringify(flashcardsData));
+        console.error('AI returned no flashcards:', JSON.stringify(flashcardsData));
         throw new Error('AI failed to generate flashcards. Please try again.');
       }
       return flashcards;
     }
 
-    // Generate flashcards via AI
+    // First attempt
     let flashcards = await callGenerateFlashcards(sampledContent);
 
-    // Validate flashcards vs source
+    // Validate support against source
     function validateFlashcards(cards: any[], source: string) {
       let supported = 0;
       const validated: any[] = [];
@@ -512,36 +553,59 @@ ${instructionExtension}
     }
 
     let { validated, supportRate } = validateFlashcards(flashcards, content);
-    console.log('Initial validation supportRate:', supportRate, 'validatedCount:', validated.length);
 
-    if (supportRate < 0.6) {
-      console.log('Support rate low (<0.6), retrying generation with stricter instruction...');
+    if (supportRate < SUPPORT_RETRY_THRESHOLD) {
       const stricterInstruction = 'IMPORTANT: Only create flashcards that are directly supported by the text above. If unsure, omit the card.';
       flashcards = await callGenerateFlashcards(sampledContent, `\n${stricterInstruction}`);
       ({ validated, supportRate } = validateFlashcards(flashcards, content));
-      console.log('Post-retry validation supportRate:', supportRate, 'validatedCount:', validated.length);
     }
 
-    if (supportRate < 0.5 || validated.length === 0) {
-      console.error('Validation failed — insufficient supported flashcards. Support rate:', supportRate);
-      throw new Error('AI-generated flashcards were not sufficiently supported by the document text. This document may be unsuitable for automatic flashcard generation. Try a text-based document, enable OCR, or edit the document to include clearer content.');
+    if (supportRate < MIN_ACCEPT_SUPPORT_RATE || validated.length === 0) {
+      throw new Error('AI-generated flashcards were not sufficiently supported by the document text. Try a text-based document, enable OCR, or edit the document to include clearer content.');
     }
 
-    // Compute per-card confidence/support score
+    // Compute confidence per card and map to page ranges by finding best matching selected chunk
     for (const c of validated) {
       c.confidence = computeSupportScore(c, content);
+      // find best chunk match among selectedChunks
+      let bestIdx = -1;
+      let bestScore = 0;
+      const cTokens = new Set(tokenizeWords(`${c.question} ${c.answer}`));
+      for (let i = 0; i < selectedChunks.length; i++) {
+        const chunkTokens = new Set(tokenizeWords(selectedChunks[i].text));
+        let matches = 0;
+        for (const t of cTokens) if (chunkTokens.has(t) && t.length >= 3) matches++;
+        const score = cTokens.size ? matches / cTokens.size : 0;
+        if (score > bestScore) { bestScore = score; bestIdx = i; }
+      }
+      if (bestIdx >= 0 && bestScore >= 0.05) {
+        c.page_from = selectedChunks[bestIdx].page_from;
+        c.page_to = selectedChunks[bestIdx].page_to;
+      } else {
+        // best-effort fallback: estimate page by searching for answer snippet in content and mapping char offset -> page
+        const pos = content.toLowerCase().indexOf((c.answer || '').slice(0,50).toLowerCase());
+        if (pos >= 0) {
+          const estimatedPage = Math.floor(pos / CHARS_PER_PAGE_ESTIMATE) + 1;
+          c.page_from = estimatedPage;
+          c.page_to = estimatedPage;
+        } else {
+          c.page_from = null;
+          c.page_to = null;
+        }
+      }
     }
 
     // Deduplicate validated cards
-    const dedupeThreshold = 0.7; // adjust as needed
-    const deduped = dedupeCards(validated, dedupeThreshold);
-    console.log('After deduplication: validated ->', validated.length, ', deduped ->', deduped.length);
+    for (const c of validated) {
+      if (c.confidence === undefined) c.confidence = computeSupportScore(c, content);
+    }
+    const deduped = dedupeCards(validated, DEDUPE_JACCARD_THRESHOLD);
 
     if (deduped.length === 0) {
       throw new Error('All generated flashcards were filtered out as duplicates or unsupported.');
     }
 
-    // Create flashcard set
+    // Create flashcard_set in DB
     const setTitle = `${document.title} - ${difficulty === 'mixed' ? 'Mixed' : difficulty.charAt(0).toUpperCase() + difficulty.slice(1)} (${deduped.length} cards)`;
     const { data: flashcardSet, error: setError } = await supabaseClient
       .from('flashcard_sets')
@@ -554,11 +618,9 @@ ${instructionExtension}
       })
       .select()
       .single();
-
     if (setError) throw setError;
-    console.log('Created flashcard set:', flashcardSet.id);
 
-    // Prepare DB insert (do not persist confidence to DB because schema lacks that column)
+    // Insert flashcards with page_from/page_to
     const flashcardsToInsert = deduped.map((card: any) => ({
       user_id: user.id,
       document_id: documentId,
@@ -566,7 +628,8 @@ ${instructionExtension}
       question: card.question,
       answer: card.answer,
       difficulty: card.difficulty || 'medium',
-      // confidence is returned to client but not inserted into DB to avoid schema changes
+      page_from: card.page_from ?? null,
+      page_to: card.page_to ?? null,
     }));
 
     const { error: insertError } = await supabaseClient
@@ -575,34 +638,27 @@ ${instructionExtension}
 
     if (insertError) throw insertError;
 
-    // Return inserted cards with confidence values (client can display them)
+    // Prepare response: include confidence and page range for UI
     const responseCards = deduped.map((c: any, i: number) => ({
-      id: flashcardsToInsert[i]?.id || null,
       question: c.question,
       answer: c.answer,
       difficulty: c.difficulty || 'medium',
-      confidence: c.confidence ?? 0
+      confidence: c.confidence ?? 0,
+      page_from: c.page_from ?? null,
+      page_to: c.page_to ?? null,
     }));
 
-    console.log(`Successfully created ${flashcardsToInsert.length} flashcards (validated & deduped)`);
-
-    return new Response(
-      JSON.stringify({
-        success: true,
-        count: flashcardsToInsert.length,
-        flashcards: responseCards,
-        usedOcr,
-        language: detectedLanguage
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
+    return new Response(JSON.stringify({
+      success: true,
+      count: flashcardsToInsert.length,
+      flashcards: responseCards,
+      usedOcr,
+      language: detectedLanguage
+    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
   } catch (error) {
     console.error('Error generating flashcards:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-    return new Response(
-      JSON.stringify({ error: errorMessage }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    );
+    return new Response(JSON.stringify({ error: errorMessage }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   }
 });
