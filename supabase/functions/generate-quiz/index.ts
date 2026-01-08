@@ -237,7 +237,7 @@ serve(async (req) => {
                 role: 'user', 
                 content: [
                   { type: 'text', text: 'Extract ALL the text content from this PDF document. Return ONLY the extracted text, preserving the structure and formatting. Do not add any commentary or explanations. Just output the raw text content from the document.' },
-                  { type: 'file', file: { filename: 'document.pdf', file_data: `data:application/pdf;base64,${pdfBase64}` } }
+                  { type: 'image_url', image_url: { url: `data:application/pdf;base64,${pdfBase64}` } }
                 ]
               }
             ],
