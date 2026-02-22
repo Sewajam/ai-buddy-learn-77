@@ -484,13 +484,7 @@ serve(async (req) => {
 
     const desiredCounts = desiredCountsForDifficulty(count, difficulty);
 
-    // Few-shot examples (kept short) and AI invocation (same patterns as earlier)
-    const fewShotExamples = `
-EXAMPLES (format: {"question":"...","answer":"...","difficulty":"easy|medium|hard"}):
-{"question":"What is gravity?","answer":"Gravity is the force that attracts objects with mass toward each other.","difficulty":"easy"}
-{"question":"How does Newton's second law relate force, mass, and acceleration?","answer":"Newton's second law states that force equals mass times acceleration (F = ma).","difficulty":"medium"}
-{"question":"Explain how the double-slit experiment demonstrates wave-particle duality.","answer":"The double-slit experiment shows that light has wave-like interference when unobserved but exhibits particle-like detection when measured, demonstrating wave-particle duality.","difficulty":"hard"}
-`;
+    // No few-shot examples to avoid biasing the AI away from document content
 
     // LOVABLE_API_KEY already declared above
 
@@ -503,25 +497,28 @@ EXAMPLES (format: {"question":"...","answer":"...","difficulty":"easy|medium|har
 
       const body = {
         model: 'google/gemini-2.5-flash',
-        temperature: 0.2,
-        top_p: 0.9,
-        max_tokens: 2000,
+        temperature: 0.15,
+        top_p: 0.85,
+        max_tokens: 8000,
         messages: [
           { role: 'system', content:
-`You are producing study flashcards formatted as JSON objects with fields: question, answer, difficulty ("easy","medium","hard").
+`You are creating study flashcards from a document. You MUST follow these rules strictly:
 
-RULES:
+CRITICAL RULES:
 1) ${distText}
-2) Questions must be directly answerable from the provided SOURCE text.
-3) Difficulty rules (answers):
-   - easy: concise factual recall, answer 1 sentence, 1–12 words.
-   - medium: conceptual, 1–2 sentences (~13–40 words).
-   - hard: analytical, 2–4 sentences (~41–250 words).
-4) Output a function call to create_flashcards with payload: { "flashcards": [ ... ] }
-5) Reply in the same language as the source text (REPLY IN: ${detectedLanguage.name}).
+2) Every question and answer MUST come DIRECTLY from the SOURCE text provided. Do NOT invent, hallucinate, or add any information not present in the source.
+3) Questions must test knowledge of specific facts, concepts, definitions, or relationships that are explicitly stated in the source text.
+4) Answers must use the same terminology and phrasing as the source text. Paraphrase minimally.
+5) Do NOT create meta-questions about the document itself (e.g., "What is this document about?", "What language is this in?"). Only ask about the actual subject matter content.
+6) Difficulty rules for answer length:
+   - easy: simple factual recall, 1 sentence, 1–12 words
+   - medium: conceptual understanding, 1–2 sentences, 13–40 words
+   - hard: analytical/detailed explanation, 2–4 sentences, 41–250 words
+7) LANGUAGE: You MUST write ALL questions and answers in the SAME language as the source text. The source text language is: ${detectedLanguage.name} (${detectedLanguage.code}). Do NOT translate to English or any other language.
+8) Spread questions across ALL parts of the provided source text, not just the beginning.
 ${instructionExtension}`
           },
-          { role: 'user', content: `SOURCE:\n\n${promptContent}\n\n${fewShotExamples}` }
+          { role: 'user', content: `SOURCE TEXT:\n\n${promptContent}` }
         ],
         tools: [{
           type: 'function',
