@@ -394,7 +394,14 @@ serve(async (req) => {
       
       if (looksBinary) {
         // Store base64 for direct PDF processing with AI
-        pdfBase64 = btoa(String.fromCharCode(...rawBuffer));
+        // Convert to base64 in chunks to avoid stack overflow
+        let binary = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < rawBuffer.length; i += chunkSize) {
+          const chunk = rawBuffer.subarray(i, i + chunkSize);
+          binary += String.fromCharCode(...chunk);
+        }
+        pdfBase64 = btoa(binary);
         console.info('PDF detected, will use AI for text extraction. Size:', rawBuffer.length);
         
         // Use AI to extract text from the PDF
