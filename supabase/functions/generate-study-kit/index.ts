@@ -51,10 +51,55 @@ serve(async (req) => {
     const isPDF = fileName.endsWith('.pdf') || file.type === 'application/pdf';
     const isImage = /\.(jpg|jpeg|png|webp)$/.test(fileName) || file.type.startsWith('image/');
 
-    if (isPDF || isImage) {
-      const base64 = bufferToBase64(rawBuffer);
-      const mimeType = isPDF ? 'application/pdf' : file.type;
+    if (isPDF) {
+      // Try native text extraction first
+      const textDecoder = new TextDecoder('utf-8', { fatal: false });
+      const rawText = textDecoder.decode(rawBuffer);
+      // Look for text stream objects in PDF
+      const streamMatches = rawText.match(/\(([^)]{2,})\)/g);
+      if (streamMatches) {
+        const candidate = streamMatches.map(m => m.slice(1, -1)).join(' ').trim();
+        if (candidate.length > 200 && (candidate.match(/[a-zA-Z\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF]/g) || []).length > 50) {
+          content = candidate;
+          console.info('Used native PDF text extraction, length:', content.length);
+        }
+      }
 
+      // Fallback: use AI vision for OCR
+      if (!content || content.length < 200) {
+        console.info('Native extraction insufficient, using AI OCR for PDF...');
+        const base64 = bufferToBase64(rawBuffer);
+        const extractResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'google/gemini-2.5-flash',
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: 'Extract ALL the text content from this PDF document. Return ONLY the raw extracted text, preserving structure. No commentary or explanations.' },
+                { type: 'image_url', image_url: { url: `data:application/pdf;base64,${base64}` } }
+              ]
+            }],
+            max_tokens: 16000,
+          }),
+        });
+
+        if (extractResponse.ok) {
+          const extractData = await extractResponse.json();
+          content = extractData.choices?.[0]?.message?.content || '';
+          console.info('AI OCR extraction result length:', content.length);
+          if (content.length < 30) {
+            console.error('AI OCR returned very little text. First 200 chars:', content.substring(0, 200));
+          }
+        } else {
+          const errText = await extractResponse.text();
+          console.error('AI OCR extraction failed:', extractResponse.status, errText);
+          throw new Error('Failed to extract text from PDF. The file may be corrupted or password-protected.');
+        }
+      }
+    } else if (isImage) {
+      const base64 = bufferToBase64(rawBuffer);
       const extractResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
@@ -63,8 +108,8 @@ serve(async (req) => {
           messages: [{
             role: 'user',
             content: [
-              { type: 'text', text: 'Extract ALL the text content from this document. Return ONLY the extracted text, preserving structure and formatting. No commentary.' },
-              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } }
+              { type: 'text', text: 'Extract ALL the text content from this image. Return ONLY the extracted text, preserving structure. No commentary.' },
+              { type: 'image_url', image_url: { url: `data:${file.type};base64,${base64}` } }
             ]
           }],
           max_tokens: 16000,
@@ -74,10 +119,11 @@ serve(async (req) => {
       if (extractResponse.ok) {
         const extractData = await extractResponse.json();
         content = extractData.choices?.[0]?.message?.content || '';
+        console.info('Image OCR result length:', content.length);
       } else {
         const errText = await extractResponse.text();
-        console.error('Extraction failed:', errText);
-        throw new Error('Failed to extract text from file');
+        console.error('Image extraction failed:', errText);
+        throw new Error('Failed to extract text from image');
       }
     } else if (isBinary) {
       // Try DOCX - extract text from XML
@@ -117,7 +163,8 @@ serve(async (req) => {
     }
 
     if (!content || content.trim().length < 30) {
-      throw new Error('Could not extract enough text from the uploaded file.');
+      console.error('Extraction failed. Content length:', content?.length || 0, 'First 100 chars:', content?.substring(0, 100));
+      throw new Error('Could not extract enough text from the uploaded file. Try a different file format (TXT works best) or ensure the file contains readable text.');
     }
 
     // Truncate if too long
