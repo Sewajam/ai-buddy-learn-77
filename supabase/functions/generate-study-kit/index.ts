@@ -163,7 +163,8 @@ serve(async (req) => {
     }
 
     if (!content || content.trim().length < 30) {
-      throw new Error('Could not extract enough text from the uploaded file.');
+      console.error('Extraction failed. Content length:', content?.length || 0, 'First 100 chars:', content?.substring(0, 100));
+      throw new Error('Could not extract enough text from the uploaded file. Try a different file format (TXT works best) or ensure the file contains readable text.');
     }
 
     // Truncate if too long
