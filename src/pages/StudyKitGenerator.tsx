@@ -20,6 +20,7 @@ export default function StudyKitGenerator() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [result, setResult] = useState<StudyKit | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
   const handleFileDrop = (e: React.DragEvent) => {
@@ -57,6 +58,11 @@ export default function StudyKitGenerator() {
 
       const data: StudyKit = await resp.json();
       setResult(data);
+
+      // Scroll to results after render
+      setTimeout(() => {
+        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 100);
     } catch (err: any) {
       console.error(err);
       toast({ title: "Generation failed", description: err.message, variant: "destructive" });
@@ -70,16 +76,8 @@ export default function StudyKitGenerator() {
     setResult(null);
   };
 
-  if (result) {
-    return (
-      <div className="min-h-screen bg-background py-10 px-4">
-        <StudyKitResults data={result} fileName={file?.name || "notes"} onReset={handleReset} />
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center px-4">
+    <div className="min-h-screen bg-background flex flex-col items-center px-4 py-16">
       <div className="w-full max-w-xl text-center space-y-8">
         {/* Branding */}
         <div className="space-y-3">
@@ -153,6 +151,13 @@ export default function StudyKitGenerator() {
           )}
         </Button>
       </div>
+
+      {/* Results section — only visible after generation */}
+      {result && (
+        <div ref={resultsRef} className="w-full max-w-3xl mt-16 pt-10 border-t">
+          <StudyKitResults data={result} fileName={file?.name || "notes"} onReset={handleReset} />
+        </div>
+      )}
     </div>
   );
 }
