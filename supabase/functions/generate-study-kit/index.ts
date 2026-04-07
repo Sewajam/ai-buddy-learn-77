@@ -1,20 +1,12 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.7.1';
+import { Buffer } from "node:buffer";
+import pdfParse from "npm:pdf-parse@1.1.1/lib/pdf-parse.js";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
-
-function isBinaryContentFromBuffer(buffer: Uint8Array): boolean {
-  const sample = buffer.subarray(0, Math.min(512, buffer.length));
-  let nonText = 0;
-  for (const byte of sample) {
-    if (byte === 0 || (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13)) nonText++;
-  }
-  return nonText / sample.length > 0.1;
-}
 
 function bufferToBase64(rawBuffer: Uint8Array): string {
   let binary = '';
@@ -26,6 +18,218 @@ function bufferToBase64(rawBuffer: Uint8Array): string {
   return btoa(binary);
 }
 
+async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<string> {
+  // Try pdf-parse first
+  try {
+    const data = await pdfParse(Buffer.from(rawBuffer));
+    const text = data.text || '';
+    const letterCount = (text.match(/[a-zA-Z\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF]/g) || []).length;
+    if (text.length > 500 && letterCount > 100) {
+      console.info('pdf-parse extracted text, length:', text.length);
+      return text;
+    }
+    console.info('pdf-parse result too short or low quality, falling back to AI OCR...');
+  } catch (e) {
+    console.warn('pdf-parse failed:', e.message);
+  }
+
+  // Fallback: AI vision OCR
+  const base64 = bufferToBase64(rawBuffer);
+  const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'google/gemini-2.5-flash',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Extract ALL the text content from this PDF document. Return ONLY the raw extracted text, preserving structure. No commentary or explanations.' },
+          { type: 'image_url', image_url: { url: `data:application/pdf;base64,${base64}` } }
+        ]
+      }],
+      max_tokens: 16000,
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.error('AI OCR failed:', resp.status, errText);
+    throw new Error('Failed to extract text from PDF.');
+  }
+  const data = await resp.json();
+  const content = data.choices?.[0]?.message?.content || '';
+  console.info('AI OCR extraction length:', content.length);
+  return content;
+}
+
+function extractDocxText(rawBuffer: Uint8Array): string {
+  // DOCX files are ZIP archives containing XML. Extract text from w:t tags.
+  const textDecoder = new TextDecoder('utf-8', { fatal: false });
+  const rawText = textDecoder.decode(rawBuffer);
+
+  // Find the word/document.xml content within the ZIP
+  const textMatches = rawText.match(/<w:t[^>]*>([^<]*)<\/w:t>/g);
+  if (textMatches && textMatches.length > 0) {
+    // Group text by paragraphs using w:p markers
+    const paragraphs: string[] = [];
+    let current = '';
+
+    // Split by paragraph markers and collect text
+    const parts = rawText.split(/<w:p[ >]/);
+    for (const part of parts) {
+      const tMatches = part.match(/<w:t[^>]*>([^<]*)<\/w:t>/g);
+      if (tMatches) {
+        const line = tMatches.map(m => m.replace(/<[^>]+>/g, '')).join('');
+        if (line.trim()) paragraphs.push(line);
+      }
+    }
+
+    const result = paragraphs.join('\n');
+    console.info('DOCX extraction length:', result.length);
+    return result;
+  }
+
+  console.warn('No w:t tags found in DOCX');
+  return '';
+}
+
+async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey: string): Promise<string> {
+  const base64 = bufferToBase64(rawBuffer);
+  const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'google/gemini-2.5-flash',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Extract ALL the text content from this image. Return ONLY the extracted text, preserving structure. No commentary.' },
+          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } }
+        ]
+      }],
+      max_tokens: 16000,
+    }),
+  });
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    console.error('Image OCR failed:', errText);
+    throw new Error('Failed to extract text from image.');
+  }
+  const data = await resp.json();
+  const content = data.choices?.[0]?.message?.content || '';
+  console.info('Image OCR length:', content.length);
+  return content;
+}
+
+// Generate study kit from a single chunk of text
+async function generateStudyKitFromText(content: string, apiKey: string): Promise<any> {
+  const systemPrompt = `You are an expert study assistant. Given student notes, you generate a comprehensive study kit. 
+
+CRITICAL RULES:
+- ALL content must come DIRECTLY from the source text. Do NOT invent information.
+- Use the SAME language as the source text for ALL output.
+- Be thorough and cover ALL major topics from the notes.`;
+
+  const userPrompt = `Generate a complete study kit from these notes. Return structured output with these sections:
+
+1. SUMMARY: A clear, comprehensive summary of the key concepts (3-5 paragraphs)
+2. FLASHCARDS: 10-15 question/answer pairs covering key facts and concepts  
+3. QUIZ: 8-10 multiple choice questions with 4 options each and the correct answer letter
+4. MINDMAP: A hierarchical bullet-point outline showing how topics relate
+5. PRACTICE QUESTIONS: 5-8 open-ended/free-response questions for deeper thinking
+6. STUDY PLAN: A 7-day study plan breaking the material into daily focus areas
+
+SOURCE TEXT:
+
+${content}`;
+
+  const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'google/gemini-2.5-flash',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      tools: [{
+        type: 'function',
+        function: {
+          name: 'create_study_kit',
+          description: 'Create a structured study kit from notes',
+          parameters: {
+            type: 'object',
+            properties: {
+              summary: { type: 'string', description: 'Comprehensive summary of the notes (3-5 paragraphs)' },
+              flashcards: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    question: { type: 'string' },
+                    answer: { type: 'string' }
+                  },
+                  required: ['question', 'answer']
+                }
+              },
+              quiz: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    question: { type: 'string' },
+                    options: { type: 'array', items: { type: 'string' } },
+                    answer: { type: 'string', description: 'The correct option letter (A, B, C, or D)' }
+                  },
+                  required: ['question', 'options', 'answer']
+                }
+              },
+              mindmap: { type: 'string', description: 'Hierarchical bullet-point outline using indentation' },
+              practice_questions: {
+                type: 'array',
+                items: { type: 'string' }
+              },
+              study_plan: { type: 'string', description: '7-day study plan with daily focus areas' }
+            },
+            required: ['summary', 'flashcards', 'quiz', 'mindmap', 'practice_questions', 'study_plan']
+          }
+        }
+      }],
+      tool_choice: { type: 'function', function: { name: 'create_study_kit' } },
+      max_tokens: 12000,
+      temperature: 0.2,
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    console.error('AI generation failed:', response.status, errText);
+    if (response.status === 429) throw new Error('RATE_LIMIT');
+    if (response.status === 402) throw new Error('CREDITS_EXHAUSTED');
+    throw new Error('AI generation failed');
+  }
+
+  const aiData = await response.json();
+  const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
+  if (!toolCall?.function?.arguments) throw new Error('AI did not return structured output');
+  return JSON.parse(toolCall.function.arguments);
+}
+
+// Merge multiple study kit results from chunks
+function mergeStudyKits(kits: any[]): any {
+  if (kits.length === 1) return kits[0];
+
+  return {
+    summary: kits.map(k => k.summary).join('\n\n'),
+    flashcards: kits.flatMap(k => k.flashcards || []),
+    quiz: kits.flatMap(k => k.quiz || []),
+    mindmap: kits.map(k => k.mindmap).join('\n\n'),
+    practice_questions: kits.flatMap(k => k.practice_questions || []),
+    study_plan: kits[0].study_plan, // Use first chunk's plan as base since it covers the full scope
+  };
+}
+
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
@@ -33,110 +237,26 @@ serve(async (req) => {
     const LOVABLE_API_KEY = Deno.env.get('LOVABLE_API_KEY');
     if (!LOVABLE_API_KEY) throw new Error('LOVABLE_API_KEY not configured');
 
-    const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
-    const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
-
     const formData = await req.formData();
     const file = formData.get('file') as File;
     if (!file) throw new Error('No file uploaded');
 
     console.info('Processing file:', file.name, 'Size:', file.size, 'Type:', file.type);
 
-    // Extract text from the file
     const rawBuffer = new Uint8Array(await file.arrayBuffer());
-    let content = '';
-
-    const isBinary = isBinaryContentFromBuffer(rawBuffer);
     const fileName = file.name.toLowerCase();
-    const isPDF = fileName.endsWith('.pdf') || file.type === 'application/pdf';
-    const isImage = /\.(jpg|jpeg|png|webp)$/.test(fileName) || file.type.startsWith('image/');
+    let notesText = '';
 
-    if (isPDF) {
-      // Try native text extraction first
-      const textDecoder = new TextDecoder('utf-8', { fatal: false });
-      const rawText = textDecoder.decode(rawBuffer);
-      // Look for text stream objects in PDF
-      const streamMatches = rawText.match(/\(([^)]{2,})\)/g);
-      if (streamMatches) {
-        const candidate = streamMatches.map(m => m.slice(1, -1)).join(' ').trim();
-        if (candidate.length > 200 && (candidate.match(/[a-zA-Z\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF]/g) || []).length > 50) {
-          content = candidate;
-          console.info('Used native PDF text extraction, length:', content.length);
-        }
-      }
-
-      // Fallback: use AI vision for OCR
-      if (!content || content.length < 200) {
-        console.info('Native extraction insufficient, using AI OCR for PDF...');
+    // --- File type detection and extraction ---
+    if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
+      notesText = await extractPdfText(rawBuffer, LOVABLE_API_KEY);
+    } else if (fileName.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      notesText = extractDocxText(rawBuffer);
+      // If DOCX extraction fails, try AI fallback
+      if (!notesText || notesText.length < 50) {
+        console.info('DOCX native extraction insufficient, using AI fallback...');
         const base64 = bufferToBase64(rawBuffer);
-        const extractResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'google/gemini-2.5-flash',
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'text', text: 'Extract ALL the text content from this PDF document. Return ONLY the raw extracted text, preserving structure. No commentary or explanations.' },
-                { type: 'image_url', image_url: { url: `data:application/pdf;base64,${base64}` } }
-              ]
-            }],
-            max_tokens: 16000,
-          }),
-        });
-
-        if (extractResponse.ok) {
-          const extractData = await extractResponse.json();
-          content = extractData.choices?.[0]?.message?.content || '';
-          console.info('AI OCR extraction result length:', content.length);
-          if (content.length < 30) {
-            console.error('AI OCR returned very little text. First 200 chars:', content.substring(0, 200));
-          }
-        } else {
-          const errText = await extractResponse.text();
-          console.error('AI OCR extraction failed:', extractResponse.status, errText);
-          throw new Error('Failed to extract text from PDF. The file may be corrupted or password-protected.');
-        }
-      }
-    } else if (isImage) {
-      const base64 = bufferToBase64(rawBuffer);
-      const extractResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'google/gemini-2.5-flash',
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'text', text: 'Extract ALL the text content from this image. Return ONLY the extracted text, preserving structure. No commentary.' },
-              { type: 'image_url', image_url: { url: `data:${file.type};base64,${base64}` } }
-            ]
-          }],
-          max_tokens: 16000,
-        }),
-      });
-
-      if (extractResponse.ok) {
-        const extractData = await extractResponse.json();
-        content = extractData.choices?.[0]?.message?.content || '';
-        console.info('Image OCR result length:', content.length);
-      } else {
-        const errText = await extractResponse.text();
-        console.error('Image extraction failed:', errText);
-        throw new Error('Failed to extract text from image');
-      }
-    } else if (isBinary) {
-      // Try DOCX - extract text from XML
-      const textDecoder = new TextDecoder('utf-8', { fatal: false });
-      const rawText = textDecoder.decode(rawBuffer);
-      const textMatches = rawText.match(/<w:t[^>]*>([^<]+)<\/w:t>/g);
-      if (textMatches) {
-        content = textMatches.map(m => m.replace(/<[^>]+>/g, '')).join(' ');
-      }
-      if (!content || content.length < 50) {
-        // Fallback: send as binary to AI
-        const base64 = bufferToBase64(rawBuffer);
-        const extractResponse = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+        const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -151,133 +271,72 @@ serve(async (req) => {
             max_tokens: 16000,
           }),
         });
-        if (extractResponse.ok) {
-          const extractData = await extractResponse.json();
-          content = extractData.choices?.[0]?.message?.content || '';
+        if (resp.ok) {
+          const data = await resp.json();
+          notesText = data.choices?.[0]?.message?.content || '';
         }
       }
-    } else {
-      // Plain text
+    } else if (fileName.endsWith('.doc')) {
+      // Legacy .doc - use AI fallback
+      const base64 = bufferToBase64(rawBuffer);
+      const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'google/gemini-2.5-flash',
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Extract ALL the text content from this document. Return ONLY the extracted text. No commentary.' },
+              { type: 'image_url', image_url: { url: `data:application/msword;base64,${base64}` } }
+            ]
+          }],
+          max_tokens: 16000,
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        notesText = data.choices?.[0]?.message?.content || '';
+      }
+    } else if (fileName.endsWith('.txt') || file.type === 'text/plain') {
       const textDecoder = new TextDecoder('utf-8', { fatal: false });
-      content = textDecoder.decode(rawBuffer);
+      notesText = textDecoder.decode(rawBuffer);
+      console.info('TXT extraction length:', notesText.length);
+    } else if (/\.(jpg|jpeg|png|webp)$/.test(fileName) || file.type.startsWith('image/')) {
+      notesText = await extractImageText(rawBuffer, file.type || 'image/jpeg', LOVABLE_API_KEY);
+    } else {
+      throw new Error('Unsupported file type. Please upload PDF, DOCX, TXT, JPG, or PNG.');
     }
 
-    if (!content || content.trim().length < 30) {
-      console.error('Extraction failed. Content length:', content?.length || 0, 'First 100 chars:', content?.substring(0, 100));
+    if (!notesText || notesText.trim().length < 30) {
+      console.error('Extraction failed. Length:', notesText?.length || 0);
       throw new Error('Could not extract enough text from the uploaded file. Try a different file format (TXT works best) or ensure the file contains readable text.');
     }
 
-    // Truncate if too long
-    const maxChars = 25000;
-    if (content.length > maxChars) {
-      content = content.substring(0, maxChars);
-    }
+    console.info('Total extracted text length:', notesText.length);
 
-    console.info('Extracted text length:', content.length);
+    // --- Chunking logic ---
+    const CHUNK_THRESHOLD = 15000;
+    const CHUNK_SIZE = 10000;
+    let studyKit: any;
 
-    // Generate the full study kit in one call using tool calling for structured output
-    const systemPrompt = `You are an expert study assistant. Given student notes, you generate a comprehensive study kit. 
-
-CRITICAL RULES:
-- ALL content must come DIRECTLY from the source text. Do NOT invent information.
-- Use the SAME language as the source text for ALL output.
-- Be thorough and cover ALL major topics from the notes.`;
-
-    const userPrompt = `Generate a complete study kit from these notes. Return structured output with these sections:
-
-1. SUMMARY: A clear, comprehensive summary of the key concepts (3-5 paragraphs)
-2. FLASHCARDS: 10-15 question/answer pairs covering key facts and concepts  
-3. QUIZ: 8-10 multiple choice questions with 4 options each and the correct answer letter
-4. MINDMAP: A hierarchical bullet-point outline showing how topics relate
-5. PRACTICE QUESTIONS: 5-8 open-ended/free-response questions for deeper thinking
-6. STUDY PLAN: A 7-day study plan breaking the material into daily focus areas
-
-SOURCE TEXT:
-
-${content}`;
-
-    const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'google/gemini-2.5-flash',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ],
-        tools: [{
-          type: 'function',
-          function: {
-            name: 'create_study_kit',
-            description: 'Create a structured study kit from notes',
-            parameters: {
-              type: 'object',
-              properties: {
-                summary: { type: 'string', description: 'Comprehensive summary of the notes (3-5 paragraphs)' },
-                flashcards: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      question: { type: 'string' },
-                      answer: { type: 'string' }
-                    },
-                    required: ['question', 'answer']
-                  }
-                },
-                quiz: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      question: { type: 'string' },
-                      options: { type: 'array', items: { type: 'string' } },
-                      answer: { type: 'string', description: 'The correct option letter (A, B, C, or D)' }
-                    },
-                    required: ['question', 'options', 'answer']
-                  }
-                },
-                mindmap: { type: 'string', description: 'Hierarchical bullet-point outline using indentation' },
-                practice_questions: {
-                  type: 'array',
-                  items: { type: 'string' }
-                },
-                study_plan: { type: 'string', description: '7-day study plan with daily focus areas' }
-              },
-              required: ['summary', 'flashcards', 'quiz', 'mindmap', 'practice_questions', 'study_plan']
-            }
-          }
-        }],
-        tool_choice: { type: 'function', function: { name: 'create_study_kit' } },
-        max_tokens: 12000,
-        temperature: 0.2,
-      }),
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error('AI generation failed:', response.status, errText);
-      if (response.status === 429) {
-        return new Response(JSON.stringify({ error: 'Rate limit exceeded. Please try again in a moment.' }), {
-          status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
+    if (notesText.length > CHUNK_THRESHOLD) {
+      console.info('Text exceeds threshold, splitting into chunks...');
+      const chunks: string[] = [];
+      for (let i = 0; i < notesText.length; i += CHUNK_SIZE) {
+        chunks.push(notesText.substring(i, i + CHUNK_SIZE));
       }
-      if (response.status === 402) {
-        return new Response(JSON.stringify({ error: 'AI credits exhausted. Please add funds.' }), {
-          status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
-        });
+      console.info(`Processing ${chunks.length} chunks...`);
+
+      const results: any[] = [];
+      for (const chunk of chunks) {
+        const result = await generateStudyKitFromText(chunk, LOVABLE_API_KEY);
+        results.push(result);
       }
-      throw new Error('AI generation failed');
+      studyKit = mergeStudyKits(results);
+    } else {
+      studyKit = await generateStudyKitFromText(notesText, LOVABLE_API_KEY);
     }
-
-    const aiData = await response.json();
-    const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
-    
-    if (!toolCall?.function?.arguments) {
-      throw new Error('AI did not return structured output');
-    }
-
-    const studyKit = JSON.parse(toolCall.function.arguments);
 
     return new Response(JSON.stringify(studyKit), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -285,9 +344,18 @@ ${content}`;
 
   } catch (error: any) {
     console.error('Error:', error);
+    if (error.message === 'RATE_LIMIT') {
+      return new Response(JSON.stringify({ error: 'Rate limit exceeded. Please try again in a moment.' }), {
+        status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
+    if (error.message === 'CREDITS_EXHAUSTED') {
+      return new Response(JSON.stringify({ error: 'AI credits exhausted. Please add funds.' }), {
+        status: 402, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
     return new Response(JSON.stringify({ error: error.message || 'Unknown error' }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
 });
