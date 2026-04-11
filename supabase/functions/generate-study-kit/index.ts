@@ -402,54 +402,26 @@ serve(async (req) => {
       if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
         notesText = await extractPdfText(rawBuffer, LOVABLE_API_KEY);
       } else if (fileName.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-        notesText = extractDocxText(rawBuffer);
-        if (!notesText || notesText.length < 50) {
+        notesText = await extractDocxText(rawBuffer);
+        if (!hasEnoughExtractedText(notesText, 50, 20)) {
           console.info('DOCX native extraction insufficient, using AI fallback...');
-          const base64 = bufferToBase64(rawBuffer);
-          const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: 'google/gemini-2.5-flash',
-              messages: [{
-                role: 'user',
-                content: [
-                  { type: 'text', text: 'Extract ALL the text content from this document. Return ONLY the extracted text. No commentary.' },
-                  { type: 'image_url', image_url: { url: `data:application/octet-stream;base64,${base64}` } }
-                ]
-              }],
-              max_tokens: 16000,
-            }),
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            notesText = data.choices?.[0]?.message?.content || '';
-          }
+          notesText = await extractTextWithAi(
+            rawBuffer,
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            LOVABLE_API_KEY,
+            'Extract ALL the readable text content from this DOCX document. Return ONLY the extracted text. No commentary.',
+          );
         }
       } else if (fileName.endsWith('.doc')) {
-        const base64 = bufferToBase64(rawBuffer);
-        const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: 'google/gemini-2.5-flash',
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'text', text: 'Extract ALL the text content from this document. Return ONLY the extracted text. No commentary.' },
-                { type: 'image_url', image_url: { url: `data:application/msword;base64,${base64}` } }
-              ]
-            }],
-            max_tokens: 16000,
-          }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          notesText = data.choices?.[0]?.message?.content || '';
-        }
+        notesText = await extractTextWithAi(
+          rawBuffer,
+          'application/msword',
+          LOVABLE_API_KEY,
+          'Extract ALL the readable text content from this document. Return ONLY the extracted text. No commentary.',
+        );
       } else if (fileName.endsWith('.txt') || file.type === 'text/plain') {
         const textDecoder = new TextDecoder('utf-8', { fatal: false });
-        notesText = textDecoder.decode(rawBuffer);
+        notesText = normalizeExtractedText(textDecoder.decode(rawBuffer));
         console.info('TXT extraction length:', notesText.length);
       } else if (/\.(jpg|jpeg|png|webp)$/.test(fileName) || file.type.startsWith('image/')) {
         notesText = await extractImageText(rawBuffer, file.type || 'image/jpeg', LOVABLE_API_KEY);
@@ -457,7 +429,9 @@ serve(async (req) => {
         throw new Error('Unsupported file type. Please upload PDF, DOCX, TXT, JPG, or PNG.');
       }
 
-      if (!notesText || notesText.trim().length < 30) {
+      notesText = normalizeExtractedText(notesText);
+
+      if (!hasEnoughExtractedText(notesText)) {
         console.error('Extraction failed. Length:', notesText?.length || 0);
         throw new Error('Could not extract enough text from the uploaded file. Try a different file format (TXT works best) or ensure the file contains readable text.');
       }
