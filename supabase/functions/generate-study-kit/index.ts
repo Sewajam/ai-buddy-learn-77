@@ -1,7 +1,6 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { Buffer } from "node:buffer";
-import pdfParse from "npm:pdf-parse@1.1.1/lib/pdf-parse.js";
+import { PDFParse } from "npm:pdf-parse@2.4.5";
 import JSZip from "npm:jszip@3.10.1";
 
 const corsHeaders = {
@@ -83,8 +82,11 @@ async function extractTextWithAi(
 }
 
 async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<string> {
+  let parser: PDFParse | null = null;
+
   try {
-    const data = await pdfParse(Buffer.from(rawBuffer));
+    parser = new PDFParse({ data: rawBuffer });
+    const data = await parser.getText();
     const text = normalizeExtractedText(data.text || '');
     if (hasEnoughExtractedText(text, 500, 100)) {
       console.info('pdf-parse extracted text, length:', text.length);
@@ -93,6 +95,8 @@ async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<st
     console.info('pdf-parse result too short or low quality, falling back to AI OCR...');
   } catch (e) {
     console.warn('pdf-parse failed:', e instanceof Error ? e.message : String(e));
+  } finally {
+    await parser?.destroy().catch(() => undefined);
   }
 
   return await extractTextWithAi(
