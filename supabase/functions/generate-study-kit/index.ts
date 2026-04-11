@@ -88,9 +88,6 @@ function extractDocxText(rawBuffer: Uint8Array): string {
   console.info('DOCX fallback extraction length:', fallback.length);
   return fallback.length > 50 ? fallback : '';
 }
-  console.warn('No w:t tags found in DOCX');
-  return '';
-}
 
 async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey: string): Promise<string> {
   const base64 = bufferToBase64(rawBuffer);
