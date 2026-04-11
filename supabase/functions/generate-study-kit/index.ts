@@ -2,6 +2,7 @@ import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { Buffer } from "node:buffer";
 import pdfParse from "npm:pdf-parse@1.1.1/lib/pdf-parse.js";
+import JSZip from "npm:jszip@3.10.1";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -18,142 +19,40 @@ function bufferToBase64(rawBuffer: Uint8Array): string {
   return btoa(binary);
 }
 
-async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<string> {
-  // Try pdf-parse first
-  try {
-    const data = await pdfParse(Buffer.from(rawBuffer));
-    const text = data.text || '';
-    const letterCount = (text.match(/[a-zA-Z\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF]/g) || []).length;
-    if (text.length > 500 && letterCount > 100) {
-      console.info('pdf-parse extracted text, length:', text.length);
-      return text;
-    }
-    console.info('pdf-parse result too short or low quality, falling back to AI OCR...');
-  } catch (e) {
-    console.warn('pdf-parse failed:', e.message);
-  }
-
-  // Fallback: AI vision OCR
-  const base64 = bufferToBase64(rawBuffer);
-  const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'google/gemini-2.5-flash',
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Extract ALL the text content from this PDF document. Return ONLY the raw extracted text, preserving structure. No commentary or explanations.' },
-          { type: 'image_url', image_url: { url: `data:application/pdf;base64,${base64}` } }
-        ]
-      }],
-      max_tokens: 16000,
-    }),
-  });
-
-  if (!resp.ok) {
-    const errText = await resp.text();
-    console.error('AI OCR failed:', resp.status, errText);
-    throw new Error('Failed to extract text from PDF.');
-  }
-  const data = await resp.json();
-  const content = data.choices?.[0]?.message?.content || '';
-  console.info('AI OCR extraction length:', content.length);
-  return content;
+function decodeXmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
 }
 
-function extractDocxText(rawBuffer: Uint8Array): string {
-  const textDecoder = new TextDecoder('utf-8', { fatal: false });
-  const rawText = textDecoder.decode(rawBuffer);
-
-  console.info('DOCX raw buffer size:', rawBuffer.length);
-  console.info('DOCX decoded text size:', rawText.length);
-
-  // Extract text from w:t tags (Word text runs)
-  const textMatches = rawText.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
-  
-  console.info('Found w:t tags:', textMatches.length);
-
-  if (textMatches.length > 0) {
-    // Extract the content between tags and join with spaces
-    const extracted = textMatches
-      .map(match => {
-        // Extract text between the tags
-        const content = match.match(/>([^<]*)</);
-        return content ? content[1] : '';
-      })
-      .filter(text => text && text.trim().length > 0)
-      .map(text => text.trim())
-      .join(' ');
-    
-    console.info('DOCX extraction found', textMatches.length, 'text elements');
-    console.info('Extracted text length:', extracted.length);
-    console.info('First 200 chars:', extracted.substring(0, 200));
-    
-    if (extracted.length > 30) {
-      return extracted;
-    }
-  }
-
-  console.warn('w:t extraction failed or too short, trying alternate method...');
-
-  // Alternate extraction: look for any text content in the XML
-  const altMatches = rawText.match(/<w:t[^>]*>(.*?)<\/w:t>/gs) || [];
-  if (altMatches.length > 0) {
-    const alt = altMatches.join(' ').replace(/<[^>]+>/g, '').trim();
-    console.info('Alternate extraction length:', alt.length);
-    if (alt.length > 30) {
-      return alt;
-    }
-  }
-
-  // Last resort: extract any readable text
-  const fallback = rawText
-    .replace(/<\?xml[^?]*\?>/g, '')  // Remove XML declaration
-    .replace(/xmlns[^=]*="[^"]*"/g, '') // Remove namespace declarations
-    .replace(/<[^>]+>/g, ' ')  // Remove all tags
-    .replace(/\s+/g, ' ')  // Collapse whitespace
+function normalizeExtractedText(text: string): string {
+  return text
+    .replace(/\u0000/g, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[^\S\n]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
-  
-  console.info('Fallback extraction length:', fallback.length);
-  console.info('Fallback first 300 chars:', fallback.substring(0, 300));
-  
-  return fallback;
 }
 
-      } else if (fileName.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-        notesText = extractDocxText(rawBuffer);
-        console.info('After extractDocxText, notesText length:', notesText.length);
-        console.info('notesText preview:', notesText.substring(0, 300));
-        
-        if (!notesText || notesText.length < 50) {
-          console.info('DOCX native extraction insufficient (<50 chars), using AI fallback...');
-          const base64 = bufferToBase64(rawBuffer);
-          const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: 'google/gemini-2.5-flash',
-              messages: [{
-                role: 'user',
-                content: [
-                  { type: 'text', text: 'Extract ALL the text content from this DOCX document. Return ONLY the extracted text, no commentary.' },
-                  { type: 'image_url', image_url: { url: `data:application/octet-stream;base64,${base64}` } }
-                ]
-              }],
-              max_tokens: 16000,
-            }),
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            notesText = data.choices?.[0]?.message?.content || '';
-            console.info('AI fallback extracted:', notesText.length, 'chars');
-          } else {
-            console.error('AI fallback failed:', resp.status);
-          }
-        }
-        
-async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey: string): Promise<string> {
+function getLetterCount(text: string): number {
+  return (text.match(/[a-zA-Z\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF\u4E00-\u9FFF]/g) || []).length;
+}
+
+function hasEnoughExtractedText(text: string, minLength = 30, minLetters = 10): boolean {
+  const normalized = normalizeExtractedText(text);
+  return normalized.length >= minLength && getLetterCount(normalized) >= minLetters;
+}
+
+async function extractTextWithAi(
+  rawBuffer: Uint8Array,
+  mimeType: string,
+  apiKey: string,
+  instructions: string,
+): Promise<string> {
   const base64 = bufferToBase64(rawBuffer);
   const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
     method: 'POST',
@@ -163,7 +62,7 @@ async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey:
       messages: [{
         role: 'user',
         content: [
-          { type: 'text', text: 'Extract ALL the text content from this image. Return ONLY the extracted text, preserving structure. No commentary.' },
+          { type: 'text', text: instructions },
           { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } }
         ]
       }],
@@ -173,13 +72,90 @@ async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey:
 
   if (!resp.ok) {
     const errText = await resp.text();
-    console.error('Image OCR failed:', errText);
-    throw new Error('Failed to extract text from image.');
+    console.error('AI extraction failed:', resp.status, errText);
+    throw new Error('Failed to extract text from file.');
   }
+
   const data = await resp.json();
-  const content = data.choices?.[0]?.message?.content || '';
-  console.info('Image OCR length:', content.length);
+  const content = normalizeExtractedText(data.choices?.[0]?.message?.content || '');
+  console.info('AI extraction length:', content.length);
   return content;
+}
+
+async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<string> {
+  try {
+    const data = await pdfParse(Buffer.from(rawBuffer));
+    const text = normalizeExtractedText(data.text || '');
+    if (hasEnoughExtractedText(text, 500, 100)) {
+      console.info('pdf-parse extracted text, length:', text.length);
+      return text;
+    }
+    console.info('pdf-parse result too short or low quality, falling back to AI OCR...');
+  } catch (e) {
+    console.warn('pdf-parse failed:', e instanceof Error ? e.message : String(e));
+  }
+
+  return await extractTextWithAi(
+    rawBuffer,
+    'application/pdf',
+    apiKey,
+    'Extract ALL the text content from this PDF document. Return ONLY the raw extracted text, preserving structure. No commentary or explanations.',
+  );
+}
+
+function extractTextFromDocxXml(xmlContent: string): string {
+  const withBreaks = xmlContent
+    .replace(/<w:tab\b[^>]*\/>/g, '\t')
+    .replace(/<w:(?:br|cr)\b[^>]*\/>/g, '\n')
+    .replace(/<\/w:p>/g, '\n')
+    .replace(/<\/w:tr>/g, '\n')
+    .replace(/<\/w:tc>/g, '\t');
+
+  const text = withBreaks
+    .replace(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g, (_match, value) => decodeXmlEntities(value))
+    .replace(/<[^>]+>/g, ' ');
+
+  return normalizeExtractedText(text);
+}
+
+async function extractDocxText(rawBuffer: Uint8Array): Promise<string> {
+  try {
+    const zip = await JSZip.loadAsync(rawBuffer);
+    const xmlEntryNames = Object.keys(zip.files)
+      .filter((name) => /^word\/(document|comments|footnotes|endnotes|header\d+|footer\d+)\.xml$/.test(name))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+    if (xmlEntryNames.length === 0) {
+      console.warn('DOCX archive did not contain readable Word XML parts');
+      return '';
+    }
+
+    const extractedSections: string[] = [];
+
+    for (const entryName of xmlEntryNames) {
+      const xmlContent = await zip.files[entryName].async('string');
+      const extracted = extractTextFromDocxXml(xmlContent);
+      if (extracted) {
+        extractedSections.push(extracted);
+      }
+    }
+
+    const combined = normalizeExtractedText(extractedSections.join('\n\n'));
+    console.info('DOCX extracted XML parts:', xmlEntryNames.length, 'Combined text length:', combined.length);
+    return combined;
+  } catch (error) {
+    console.warn('DOCX extraction failed:', error instanceof Error ? error.message : String(error));
+    return '';
+  }
+}
+
+async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey: string): Promise<string> {
+  return await extractTextWithAi(
+    rawBuffer,
+    mimeType,
+    apiKey,
+    'Extract ALL the text content from this image. Return ONLY the extracted text, preserving structure. No commentary.',
+  );
 }
 
 // ============================================================================
