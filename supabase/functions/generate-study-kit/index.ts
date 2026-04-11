@@ -66,29 +66,93 @@ function extractDocxText(rawBuffer: Uint8Array): string {
   const textDecoder = new TextDecoder('utf-8', { fatal: false });
   const rawText = textDecoder.decode(rawBuffer);
 
+  console.info('DOCX raw buffer size:', rawBuffer.length);
+  console.info('DOCX decoded text size:', rawText.length);
+
   // Extract text from w:t tags (Word text runs)
   const textMatches = rawText.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
   
+  console.info('Found w:t tags:', textMatches.length);
+
   if (textMatches.length > 0) {
+    // Extract the content between tags and join with spaces
     const extracted = textMatches
-      .map(match => match.replace(/<[^>]+>/g, '').trim())
-      .filter(text => text.length > 0)
+      .map(match => {
+        // Extract text between the tags
+        const content = match.match(/>([^<]*)</);
+        return content ? content[1] : '';
+      })
+      .filter(text => text && text.trim().length > 0)
+      .map(text => text.trim())
       .join(' ');
     
-    console.info('DOCX extraction found', textMatches.length, 'text elements, total length:', extracted.length);
-    return extracted;
+    console.info('DOCX extraction found', textMatches.length, 'text elements');
+    console.info('Extracted text length:', extracted.length);
+    console.info('First 200 chars:', extracted.substring(0, 200));
+    
+    if (extracted.length > 30) {
+      return extracted;
+    }
   }
 
-  // Fallback: try to extract any readable text between XML tags
+  console.warn('w:t extraction failed or too short, trying alternate method...');
+
+  // Alternate extraction: look for any text content in the XML
+  const altMatches = rawText.match(/<w:t[^>]*>(.*?)<\/w:t>/gs) || [];
+  if (altMatches.length > 0) {
+    const alt = altMatches.join(' ').replace(/<[^>]+>/g, '').trim();
+    console.info('Alternate extraction length:', alt.length);
+    if (alt.length > 30) {
+      return alt;
+    }
+  }
+
+  // Last resort: extract any readable text
   const fallback = rawText
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/<\?xml[^?]*\?>/g, '')  // Remove XML declaration
+    .replace(/xmlns[^=]*="[^"]*"/g, '') // Remove namespace declarations
+    .replace(/<[^>]+>/g, ' ')  // Remove all tags
+    .replace(/\s+/g, ' ')  // Collapse whitespace
     .trim();
   
-  console.info('DOCX fallback extraction length:', fallback.length);
-  return fallback.length > 50 ? fallback : '';
+  console.info('Fallback extraction length:', fallback.length);
+  console.info('Fallback first 300 chars:', fallback.substring(0, 300));
+  
+  return fallback;
 }
 
+      } else if (fileName.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        notesText = extractDocxText(rawBuffer);
+        console.info('After extractDocxText, notesText length:', notesText.length);
+        console.info('notesText preview:', notesText.substring(0, 300));
+        
+        if (!notesText || notesText.length < 50) {
+          console.info('DOCX native extraction insufficient (<50 chars), using AI fallback...');
+          const base64 = bufferToBase64(rawBuffer);
+          const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${LOVABLE_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'google/gemini-2.5-flash',
+              messages: [{
+                role: 'user',
+                content: [
+                  { type: 'text', text: 'Extract ALL the text content from this DOCX document. Return ONLY the extracted text, no commentary.' },
+                  { type: 'image_url', image_url: { url: `data:application/octet-stream;base64,${base64}` } }
+                ]
+              }],
+              max_tokens: 16000,
+            }),
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            notesText = data.choices?.[0]?.message?.content || '';
+            console.info('AI fallback extracted:', notesText.length, 'chars');
+          } else {
+            console.error('AI fallback failed:', resp.status);
+          }
+        }
+        
 async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey: string): Promise<string> {
   const base64 = bufferToBase64(rawBuffer);
   const resp = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
