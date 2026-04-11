@@ -252,9 +252,10 @@ ${content}`;
     console.info('Successfully parsed JSON from AI response');
     return validateAndNormalizeStudyKit(parsed);
   } catch (parseError) {
-    console.error('Failed to parse JSON:', parseError.message);
+    const parseMessage = parseError instanceof Error ? parseError.message : String(parseError);
+    console.error('Failed to parse JSON:', parseMessage);
     console.error('Attempted to parse:', jsonStr.substring(0, 200));
-    throw new Error('AI did not return valid JSON: ' + parseError.message);
+    throw new Error('AI did not return valid JSON: ' + parseMessage);
   }
 }
 
