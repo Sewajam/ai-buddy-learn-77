@@ -63,32 +63,31 @@ async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<st
 }
 
 function extractDocxText(rawBuffer: Uint8Array): string {
-  // DOCX files are ZIP archives containing XML. Extract text from w:t tags.
   const textDecoder = new TextDecoder('utf-8', { fatal: false });
   const rawText = textDecoder.decode(rawBuffer);
 
-  // Find the word/document.xml content within the ZIP
-  const textMatches = rawText.match(/<w:t[^>]*>([^<]*)<\/w:t>/g);
-  if (textMatches && textMatches.length > 0) {
-    // Group text by paragraphs using w:p markers
-    const paragraphs: string[] = [];
-    let current = '';
-
-    // Split by paragraph markers and collect text
-    const parts = rawText.split(/<w:p[ >]/);
-    for (const part of parts) {
-      const tMatches = part.match(/<w:t[^>]*>([^<]*)<\/w:t>/g);
-      if (tMatches) {
-        const line = tMatches.map(m => m.replace(/<[^>]+>/g, '')).join('');
-        if (line.trim()) paragraphs.push(line);
-      }
-    }
-
-    const result = paragraphs.join('\n');
-    console.info('DOCX extraction length:', result.length);
-    return result;
+  // Extract text from w:t tags (Word text runs)
+  const textMatches = rawText.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [];
+  
+  if (textMatches.length > 0) {
+    const extracted = textMatches
+      .map(match => match.replace(/<[^>]+>/g, '').trim())
+      .filter(text => text.length > 0)
+      .join(' ');
+    
+    console.info('DOCX extraction found', textMatches.length, 'text elements, total length:', extracted.length);
+    return extracted;
   }
 
+  // Fallback: try to extract any readable text between XML tags
+  const fallback = rawText
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  
+  console.info('DOCX fallback extraction length:', fallback.length);
+  return fallback.length > 50 ? fallback : '';
+}
   console.warn('No w:t tags found in DOCX');
   return '';
 }
