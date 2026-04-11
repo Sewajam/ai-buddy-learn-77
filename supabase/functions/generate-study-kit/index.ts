@@ -122,23 +122,41 @@ async function extractImageText(rawBuffer: Uint8Array, mimeType: string, apiKey:
   return content;
 }
 
-// Generate study kit from a single chunk of text
+// ============================================================================
+// IMPROVED: Generate study kit from a single chunk of text
+// Uses the new system prompt and enforces strict JSON output
+// ============================================================================
 async function generateStudyKitFromText(content: string, apiKey: string): Promise<any> {
-  const systemPrompt = `You are an expert study assistant. Given student notes, you generate a comprehensive study kit. 
+  const systemPrompt = `You are an AI Study Kit Generator. You take raw text extracted from user-uploaded files (PDF, DOCX, TXT, JPG, PNG). Your job is to return a complete, structured study kit with the following sections:
+
+1. Summary — 5 to 10 bullet points capturing the core ideas.
+2. Flashcards — at least 20 cards, each with {"front": "...", "back": "..."}.
+3. Quiz — 10 questions (multiple choice + short-answer mix).
+4. Mind Map — a text-based hierarchical outline showing topic relationships.
+5. Practice Questions — 5 open-ended questions.
+6. 7-Day Study Plan — daily tasks, concise and actionable.
+
+Your output MUST be strict JSON in the following format ONLY. Do NOT add commentary, explanations, or text outside the JSON:
+{
+  "summary": ["bullet1", "bullet2", ...],
+  "flashcards": [{"front": "...", "back": "..."}, ...],
+  "quiz": [{"question": "...", "type": "multiple-choice|short-answer", "options": [...], "correctAnswer": "..."}, ...],
+  "mindMap": "...",
+  "practiceQuestions": ["question1", "question2", ...],
+  "studyPlan": [{"day": 1, "focus": "...", "tasks": ["task1", "task2", ...]}, ...]
+}
 
 CRITICAL RULES:
-- ALL content must come DIRECTLY from the source text. Do NOT invent information.
+- Return ONLY valid JSON. No preamble, no explanation, no markdown code blocks.
+- All content must come DIRECTLY from the source text. Do NOT invent information.
 - Use the SAME language as the source text for ALL output.
-- Be thorough and cover ALL major topics from the notes.`;
+- Be thorough and cover ALL major topics from the notes.
+- Flashcards minimum 20 cards.
+- Quiz includes both multiple-choice and short-answer questions.
+- Summary is an array of bullet points.
+- studyPlan array contains 7 day objects with day number, focus area, and tasks array.`;
 
-  const userPrompt = `Generate a complete study kit from these notes. Return structured output with these sections:
-
-1. SUMMARY: A clear, comprehensive summary of the key concepts (3-5 paragraphs)
-2. FLASHCARDS: 10-15 question/answer pairs covering key facts and concepts  
-3. QUIZ: 8-10 multiple choice questions with 4 options each and the correct answer letter
-4. MINDMAP: A hierarchical bullet-point outline showing how topics relate
-5. PRACTICE QUESTIONS: 5-8 open-ended/free-response questions for deeper thinking
-6. STUDY PLAN: A 7-day study plan breaking the material into daily focus areas
+  const userPrompt = `Generate a complete, valid JSON study kit from these notes. Return ONLY the JSON object, no other text.
 
 SOURCE TEXT:
 
@@ -153,52 +171,8 @@ ${content}`;
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ],
-      tools: [{
-        type: 'function',
-        function: {
-          name: 'create_study_kit',
-          description: 'Create a structured study kit from notes',
-          parameters: {
-            type: 'object',
-            properties: {
-              summary: { type: 'string', description: 'Comprehensive summary of the notes (3-5 paragraphs)' },
-              flashcards: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    question: { type: 'string' },
-                    answer: { type: 'string' }
-                  },
-                  required: ['question', 'answer']
-                }
-              },
-              quiz: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    question: { type: 'string' },
-                    options: { type: 'array', items: { type: 'string' } },
-                    answer: { type: 'string', description: 'The correct option letter (A, B, C, or D)' }
-                  },
-                  required: ['question', 'options', 'answer']
-                }
-              },
-              mindmap: { type: 'string', description: 'Hierarchical bullet-point outline using indentation' },
-              practice_questions: {
-                type: 'array',
-                items: { type: 'string' }
-              },
-              study_plan: { type: 'string', description: '7-day study plan with daily focus areas' }
-            },
-            required: ['summary', 'flashcards', 'quiz', 'mindmap', 'practice_questions', 'study_plan']
-          }
-        }
-      }],
-      tool_choice: { type: 'function', function: { name: 'create_study_kit' } },
-      max_tokens: 12000,
-      temperature: 0.2,
+      max_tokens: 16000,
+      temperature: 0.3,
     }),
   });
 
@@ -211,9 +185,138 @@ ${content}`;
   }
 
   const aiData = await response.json();
-  const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
-  if (!toolCall?.function?.arguments) throw new Error('AI did not return structured output');
-  return JSON.parse(toolCall.function.arguments);
+  const content_text = aiData.choices?.[0]?.message?.content || '';
+  
+  if (!content_text) {
+    throw new Error('AI did not return any content');
+  }
+
+  console.info('Raw AI response length:', content_text.length);
+  console.info('First 500 chars:', content_text.substring(0, 500));
+
+  // Extract JSON from the response (handles cases where model adds markdown or extra text)
+  let jsonStr = content_text.trim();
+  
+  // Remove markdown code blocks if present
+  if (jsonStr.startsWith('```json')) {
+    jsonStr = jsonStr.replace(/^```json\n?/, '').replace(/\n?```$/, '');
+  } else if (jsonStr.startsWith('```')) {
+    jsonStr = jsonStr.replace(/^```\n?/, '').replace(/\n?```$/, '');
+  }
+
+  jsonStr = jsonStr.trim();
+
+  // Try to parse JSON
+  try {
+    const parsed = JSON.parse(jsonStr);
+    console.info('Successfully parsed JSON from AI response');
+    return validateAndNormalizeStudyKit(parsed);
+  } catch (parseError) {
+    console.error('Failed to parse JSON:', parseError.message);
+    console.error('Attempted to parse:', jsonStr.substring(0, 200));
+    throw new Error('AI did not return valid JSON: ' + parseError.message);
+  }
+}
+
+// ============================================================================
+// Validate and normalize the study kit structure
+// ============================================================================
+function validateAndNormalizeStudyKit(kit: any): any {
+  const normalized: any = {
+    summary: [],
+    flashcards: [],
+    quiz: [],
+    mindMap: '',
+    practiceQuestions: [],
+    studyPlan: []
+  };
+
+  // Validate and normalize summary
+  if (Array.isArray(kit.summary)) {
+    normalized.summary = kit.summary.filter((s: any) => s && String(s).trim().length > 0).map((s: any) => String(s).trim());
+  } else if (typeof kit.summary === 'string') {
+    normalized.summary = kit.summary.split('\n').filter((s: string) => s.trim().length > 0);
+  }
+  if (normalized.summary.length === 0) {
+    throw new Error('Summary is empty or invalid');
+  }
+
+  // Validate and normalize flashcards
+  if (Array.isArray(kit.flashcards)) {
+    normalized.flashcards = kit.flashcards
+      .filter((card: any) => card && (card.front || card.question) && (card.back || card.answer))
+      .map((card: any) => ({
+        front: String(card.front || card.question).trim(),
+        back: String(card.back || card.answer).trim()
+      }));
+  }
+  if (normalized.flashcards.length < 20) {
+    console.warn(`Flashcards less than 20 (got ${normalized.flashcards.length}), but continuing`);
+  }
+
+  // Validate and normalize quiz
+  if (Array.isArray(kit.quiz)) {
+    normalized.quiz = kit.quiz
+      .filter((q: any) => q && q.question && q.options && q.correctAnswer)
+      .map((q: any) => ({
+        question: String(q.question).trim(),
+        type: q.type || 'multiple-choice',
+        options: Array.isArray(q.options) ? q.options.map((o: any) => String(o).trim()) : [],
+        correctAnswer: String(q.correctAnswer).trim()
+      }))
+      .filter((q: any) => q.options.length > 0);
+  }
+  if (normalized.quiz.length === 0) {
+    throw new Error('Quiz is empty or invalid');
+  }
+
+  // Validate and normalize mind map
+  if (typeof kit.mindMap === 'string') {
+    normalized.mindMap = kit.mindMap.trim();
+  } else if (typeof kit.mind_map === 'string') {
+    normalized.mindMap = kit.mind_map.trim();
+  }
+  if (normalized.mindMap.length === 0) {
+    throw new Error('Mind map is empty or invalid');
+  }
+
+  // Validate and normalize practice questions
+  if (Array.isArray(kit.practiceQuestions)) {
+    normalized.practiceQuestions = kit.practiceQuestions
+      .filter((q: any) => q && String(q).trim().length > 0)
+      .map((q: any) => String(q).trim());
+  } else if (Array.isArray(kit.practice_questions)) {
+    normalized.practiceQuestions = kit.practice_questions
+      .filter((q: any) => q && String(q).trim().length > 0)
+      .map((q: any) => String(q).trim());
+  }
+  if (normalized.practiceQuestions.length === 0) {
+    throw new Error('Practice questions are empty or invalid');
+  }
+
+  // Validate and normalize study plan
+  if (Array.isArray(kit.studyPlan)) {
+    normalized.studyPlan = kit.studyPlan
+      .filter((day: any) => day && day.day && day.focus)
+      .map((day: any) => ({
+        day: day.day,
+        focus: String(day.focus).trim(),
+        tasks: Array.isArray(day.tasks) ? day.tasks.map((t: any) => String(t).trim()) : []
+      }));
+  } else if (Array.isArray(kit.study_plan)) {
+    normalized.studyPlan = kit.study_plan
+      .filter((day: any) => day && day.day && day.focus)
+      .map((day: any) => ({
+        day: day.day,
+        focus: String(day.focus).trim(),
+        tasks: Array.isArray(day.tasks) ? day.tasks.map((t: any) => String(t).trim()) : []
+      }));
+  }
+  if (normalized.studyPlan.length === 0) {
+    throw new Error('Study plan is empty or invalid');
+  }
+
+  return normalized;
 }
 
 // Merge multiple study kit results from chunks
@@ -221,12 +324,12 @@ function mergeStudyKits(kits: any[]): any {
   if (kits.length === 1) return kits[0];
 
   return {
-    summary: kits.map(k => k.summary).join('\n\n'),
+    summary: kits.flatMap(k => k.summary || []),
     flashcards: kits.flatMap(k => k.flashcards || []),
     quiz: kits.flatMap(k => k.quiz || []),
-    mindmap: kits.map(k => k.mindmap).join('\n\n'),
-    practice_questions: kits.flatMap(k => k.practice_questions || []),
-    study_plan: kits[0].study_plan, // Use first chunk's plan as base since it covers the full scope
+    mindMap: kits.map(k => k.mindMap).filter(m => m && m.length > 0).join('\n\n'),
+    practiceQuestions: kits.flatMap(k => k.practiceQuestions || []),
+    studyPlan: kits[0].studyPlan, // Use first chunk's plan as base since it covers the full scope
   };
 }
 
