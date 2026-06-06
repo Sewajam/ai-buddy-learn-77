@@ -84,9 +84,6 @@ async function extractTextWithAi(
 }
 
 async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<string> {
-  // PDF parsing libraries (pdf-parse, pdfjs-dist) rely on browser APIs like
-  // DOMMatrix that Deno doesn't provide. Send the PDF directly to Gemini,
-  // which natively understands PDF documents.
   return await extractTextWithAi(
     rawBuffer,
     'application/pdf',
