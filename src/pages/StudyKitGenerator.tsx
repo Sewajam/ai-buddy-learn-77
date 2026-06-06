@@ -3,6 +3,7 @@ import { Upload, Sparkles, FileText, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import StudyKitResults from "@/components/StudyKitResults";
+import { supabase } from "@/integrations/supabase/client";
 
 type StudyKit = {
   summary: string;
@@ -42,22 +43,18 @@ export default function StudyKitGenerator() {
       const formData = new FormData();
       formData.append("file", file);
 
-      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-study-kit`;
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
-        },
+      const { data, error } = await supabase.functions.invoke("generate-study-kit", {
         body: formData,
       });
 
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: "Unknown error" }));
-        throw new Error(err.error || `Error ${resp.status}`);
+      if (error) {
+        throw new Error(error.message || "Failed to generate study kit");
+      }
+      if (!data) {
+        throw new Error("No data returned");
       }
 
-      const data: StudyKit = await resp.json();
-      setResult(data);
+      setResult(data as StudyKit);
 
       // Scroll to results after render
       setTimeout(() => {
