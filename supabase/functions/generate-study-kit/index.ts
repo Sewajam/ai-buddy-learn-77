@@ -1,7 +1,7 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { PDFParse } from "npm:pdf-parse@2.4.5";
 import JSZip from "npm:jszip@3.10.1";
+
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -84,30 +84,17 @@ async function extractTextWithAi(
 }
 
 async function extractPdfText(rawBuffer: Uint8Array, apiKey: string): Promise<string> {
-  let parser: PDFParse | null = null;
-
-  try {
-    parser = new PDFParse({ data: rawBuffer });
-    const data = await parser.getText();
-    const text = normalizeExtractedText(data.text || '');
-    if (hasEnoughExtractedText(text, 500, 100)) {
-      console.info('pdf-parse extracted text, length:', text.length);
-      return text;
-    }
-    console.info('pdf-parse result too short or low quality, falling back to AI OCR...');
-  } catch (e) {
-    console.warn('pdf-parse failed:', e instanceof Error ? e.message : String(e));
-  } finally {
-    await parser?.destroy().catch(() => undefined);
-  }
-
+  // PDF parsing libraries (pdf-parse, pdfjs-dist) rely on browser APIs like
+  // DOMMatrix that Deno doesn't provide. Send the PDF directly to Gemini,
+  // which natively understands PDF documents.
   return await extractTextWithAi(
     rawBuffer,
     'application/pdf',
     apiKey,
-    'Extract ALL the text content from this PDF document. Return ONLY the raw extracted text, preserving structure. No commentary or explanations.',
+    'Extract ALL the text content from this PDF document. Return ONLY the raw extracted text, preserving structure (headings, paragraphs, lists). No commentary or explanations.',
   );
 }
+
 
 function extractTextFromDocxXml(xmlContent: string): string {
   const withBreaks = xmlContent
