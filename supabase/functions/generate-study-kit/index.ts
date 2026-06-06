@@ -1,7 +1,7 @@
 import "https://deno.land/x/xhr@0.1.0/mod.ts";
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { PDFParse } from "npm:pdf-parse@2.4.5";
 import JSZip from "npm:jszip@3.10.1";
+
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
