@@ -8,10 +8,16 @@ extra_search_path = ["public", "extensions"]
 max_rows = 1000
 
 [functions.study-chat]
-verify_jwt = true
+verify_jwt = false
 
 [functions.generate-flashcards]
-verify_jwt = true
+verify_jwt = false
 
 [functions.generate-quiz]
-verify_jwt = true
+verify_jwt = false
+
+[functions.generate-study-kit]
+verify_jwt = false
+
+[functions.generate-study-kit]
+verify_jwt = false
