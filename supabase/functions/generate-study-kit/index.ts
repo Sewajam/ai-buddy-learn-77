@@ -318,7 +318,8 @@ function validateAndNormalizeStudyKit(kit: any): any {
       .map((q: any) => String(q).trim());
   }
   if (normalized.practiceQuestions.length === 0) {
-    throw new Error('Practice questions are empty or invalid');
+    console.warn('Practice questions missing from AI response, generating fallback from quiz');
+    normalized.practiceQuestions = normalized.quiz.slice(0, 5).map((q: any) => q.question);
   }
 
   // Validate and normalize study plan
