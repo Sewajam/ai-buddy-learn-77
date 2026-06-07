@@ -17,3 +17,6 @@ verify_jwt = false
 verify_jwt = false
 
 
+
+[functions.generate-study-kit]
+verify_jwt = false
